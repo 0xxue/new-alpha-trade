@@ -1,0 +1,12 @@
+{
+  "_comment": "复制为 servers.local.json（gitignored）后填入真实凭据。脚本默认从 ~/.ssh/new-alpha-trade.key 读 key。",
+  "servers": [
+    {
+      "name": "prod-bsc-1",
+      "host": "198.51.100.10",
+      "ssh_user": "root",
+      "ssh_key_path": "~/.ssh/new-alpha-trade.key",
+      "role": "primary"
+    }
+  ]
+}

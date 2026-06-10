@@ -1,0 +1,70 @@
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ============ Rust ============
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ============ Node / Vite ============
+node_modules/
+dist/
+.vite/
+*.local
+.eslintcache
+
+# ============ Editors ============
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============ Project data (运行时生成 — 含账户/cookies/2FA，绝不上传) ============
+data/
+!data/.gitkeep
+
+# ============ Secrets (绝不上传) ============
+*.env
+!.env.example
+secrets/
+**/secrets.env
+config/servers.local.json
+scripts/config/servers.local.json
+# 真实凭据 / SSH key
+*.key
+*.pem
+.htpasswd
+
+# ============ Claude Code / 本地工具私有配置 ============
+.claude/
+CLAUDE.md
+
+# ============ 内部规划 / 独立实验项目（不随主仓库开源）============
+plans/
+qait-sniper/
+
+# ============ 日志和临时 ============
+*.log
+*.tmp
+*.bak
+
+# generated from vite.config.ts
+web-ui/vite.config.js
+web-ui/vite.config.d.ts
+*.tsbuildinfo

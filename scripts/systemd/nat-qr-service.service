@@ -1,0 +1,24 @@
+[Unit]
+Description=new-alpha-trade QR Service (FastAPI + Playwright)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=newalpha
+Group=newalpha
+WorkingDirectory=/opt/new-alpha-trade/qr-service
+EnvironmentFile=/etc/new-alpha-trade/qr-service.env
+ExecStart=/opt/new-alpha-trade/qr-service/.venv/bin/python -m uvicorn qr_service.main:app --host 127.0.0.1 --port 7001
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+# Playwright Chromium 需要这个目录
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/new-alpha-trade/data/playwright-browsers
+# 允许调用浏览器需要的 syscall
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

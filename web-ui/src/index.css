@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}

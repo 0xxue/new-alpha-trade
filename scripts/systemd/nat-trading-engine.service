@@ -1,0 +1,21 @@
+[Unit]
+Description=new-alpha-trade Trading Engine (Rust / axum)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=newalpha
+Group=newalpha
+WorkingDirectory=/opt/new-alpha-trade
+EnvironmentFile=/etc/new-alpha-trade/trading-engine.env
+ExecStart=/opt/new-alpha-trade/trading-engine
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

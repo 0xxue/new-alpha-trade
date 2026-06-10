@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/binance-alpha",
+    "crates/strategy",
+    "crates/risk",
+    "crates/persistence",
+    "crates/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+authors = ["new-alpha-trade"]
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip", "brotli", "deflate"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros", "migrate", "chrono"] }
+rust_decimal = { version = "1.35", features = ["serde-with-str"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+async-trait = "0.1"
+futures = "0.3"
+rand = "0.8"
+
+# 工作区内 crate 互相引用
+binance-alpha = { path = "crates/binance-alpha" }
+strategy = { path = "crates/strategy" }
+risk = { path = "crates/risk" }
+persistence = { path = "crates/persistence" }
+api = { path = "crates/api" }
+
+[package]
+name = "trading-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+api.workspace = true
+persistence.workspace = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

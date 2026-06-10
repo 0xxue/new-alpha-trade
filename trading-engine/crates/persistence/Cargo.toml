@@ -1,0 +1,21 @@
+[package]
+name = "persistence"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.10"
+rust_decimal_macros = "1.35"
+tokio = { version = "1.38", features = ["macros", "rt"] }

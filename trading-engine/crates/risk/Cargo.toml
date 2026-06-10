@@ -1,0 +1,10 @@
+[package]
+name = "risk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+rust_decimal.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
