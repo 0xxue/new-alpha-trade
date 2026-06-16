@@ -319,7 +319,21 @@ async fn get_orderbook_smart(
     };
     // V2.tune15: 用最近成交价（按 symbol 过滤）作 anchor，对称过滤双边 stale 残留挂单。
     // recent_trades buffer 是 ws aggTrade 喂的，是真实最新成交价，比 best_bid/best_ask 可信。
-    let anchor = state.recent_trades.last_price_for(symbol);
+    let last_trade = state.recent_trades.last_price_for(symbol);
+    // V2.tune34: 用 orderbook 自身中位价校准 anchor。
+    // 波动币（如 QAIT）last_trade 可能严重过时（aggTrade 流没更新 / 价格快速移动），
+    // 离真实盘口 >5% 时会把整端真实档位砍光。orderbook 中位数 zombie 是少数 outlier，
+    // 天然抗它。规则：last_trade 离中位数 ±5% 内 → 信 last_trade（更精确）；否则用中位数。
+    let ob_median = orderbook_median_price(&book);
+    let anchor = match (last_trade, ob_median) {
+        (Some(lt), Some(med)) if med > Decimal::ZERO => {
+            let dev = ((lt - med) / med).abs();
+            if dev <= Decimal::from_str("0.05").unwrap() { Some(lt) } else { Some(med) }
+        }
+        (Some(lt), _) => Some(lt),
+        (None, Some(med)) => Some(med),
+        (None, None) => None,
+    };
     let filtered = filter_stale_levels(book.clone(), anchor);
     // V2.tune33: 如果过滤把整个 bid 或 ask 端清空，说明 anchor 已经严重过时
     // （市场快速波动，last_trade 离当前 best 价差 >5%）。这时用 raw 兜底，
@@ -346,6 +360,22 @@ async fn get_orderbook_smart(
 /// - bid > anchor × 1.05 → 拒（不可能合法的 bid 比成交价高 5%）
 /// - ask < anchor × 0.95 → 拒（不可能合法的 ask 比成交价低 5%）
 ///
+/// V2.tune34: orderbook 自身所有档位价格的中位数。zombie 单是极少数 outlier，
+/// 中位数天然抗它 → 当 last_trade（aggTrade）过时时用它重新锚定真实价。
+fn orderbook_median_price(book: &binance_alpha::OrderBookSnapshot) -> Option<Decimal> {
+    let mut prices: Vec<Decimal> = book
+        .bids
+        .iter()
+        .chain(book.asks.iter())
+        .filter_map(|lvl| Decimal::from_str(&lvl[0]).ok())
+        .collect();
+    if prices.is_empty() {
+        return None;
+    }
+    prices.sort();
+    Some(prices[prices.len() / 2])
+}
+
 /// 若 anchor 不存在（recent_trades 还空），退化为 V2.tune13 的 "ask < best_bid × 0.95 → 拒"。
 fn filter_stale_levels(
     mut book: binance_alpha::OrderBookSnapshot,
@@ -1272,10 +1302,12 @@ async fn final_cleanup(state: &AppState, auth: &AuthBundle, job_id: &str, symbol
 // V2 smart OTO round — 决策矩阵 + maker/taker 混合 + rounds 表入库
 // =============================================================================
 
-/// pending maker 等待时间。
+/// pending/working maker 等待时间。
 /// V2.tune2 实测把 5→8s + fast 改 maker 后 timeout 飙到 67%，wear -31 bps 触发风控 pause。
-/// 回退到 5s。NEX 波动大，maker pending 长时间挂会大概率被市场抛下/被取消。
-const MAKER_TIMEOUT_S: u64 = 5;
+/// V2.tune35：5→3s。低流动性币（BILL/SLX）maker 大概率挂不上，实测 BILL double_maker
+/// 失败率 77%、taker_maker_hybrid 71%，每个 timeout 浪费 5-9s。缩到 3s 让失败 round 快速
+/// fallback emergency_sell，整体提速 ~40%。能挂上的 maker 通常 1-2s 内就成交，3s 够。
+const MAKER_TIMEOUT_S: u64 = 3;
 
 /// Smart 模式：根据 decision 选择 maker / taker 价格
 #[allow(clippy::too_many_arguments)]
