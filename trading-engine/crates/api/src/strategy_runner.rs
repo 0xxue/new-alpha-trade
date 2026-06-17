@@ -307,24 +307,47 @@ async fn get_orderbook_smart(
     state: &AppState,
     symbol: &str,
 ) -> Result<binance_alpha::OrderBookSnapshot, binance_alpha::AlphaApiError> {
-    let book = if let Some(b) = state.live_book.snapshot_fresh() {
+    // 1) 优先用 live_book（WS 增量）。过滤后非空就用。
+    if let Some(b) = state.live_book.snapshot_fresh() {
         if b.symbol == symbol {
-            b
-        } else {
-            // WS 缓存的是别的币的 book，fallback REST 拿正确 symbol 的
-            state.alpha.get_full_depth(symbol, 20).await?
+            let filtered = anchor_filter(state, symbol, &b);
+            if !filtered.bids.is_empty() && !filtered.asks.is_empty() {
+                return Ok(filtered);
+            }
+            // V2.tune36: live_book 被 zombie 污染（如 QAIT ask 端累积 20+ 个 stale 低价单，
+            // snapshot 取最低 20 档全是 zombie，真实档被挤出）→ 过滤后整端空。
+            // 此时**改用 REST**（更干净，top-20 通常含真实档），而不是返回 live_book raw zombie。
+            tracing::warn!(
+                symbol, filt_bids = filtered.bids.len(), filt_asks = filtered.asks.len(),
+                "live_book filtered empty (zombie-polluted) → refetch REST"
+            );
         }
-    } else {
-        state.alpha.get_full_depth(symbol, 20).await?
-    };
-    // V2.tune15: 用最近成交价（按 symbol 过滤）作 anchor，对称过滤双边 stale 残留挂单。
-    // recent_trades buffer 是 ws aggTrade 喂的，是真实最新成交价，比 best_bid/best_ask 可信。
+    }
+    // 2) REST fallback（live_book 不 fresh / 别的 symbol / 被 zombie 污染）
+    let rest = state.alpha.get_full_depth(symbol, 20).await?;
+    let filtered = anchor_filter(state, symbol, &rest);
+    if filtered.bids.is_empty() || filtered.asks.is_empty() {
+        // REST 都过滤空 → 盘口真的全是 zombie（极端情况），返回 raw 让 price-sanity 兜底拒单
+        tracing::warn!(
+            symbol, raw_bids = rest.bids.len(), raw_asks = rest.asks.len(),
+            filt_bids = filtered.bids.len(), filt_asks = filtered.asks.len(),
+            "REST also filtered empty → return raw (price-sanity will refuse if crossed)"
+        );
+        return Ok(rest);
+    }
+    Ok(filtered)
+}
+
+/// V2.tune15/34/36：用 anchor 价对称过滤盘口 stale 残留。
+/// anchor 优先 last_trade（aggTrade，最精确），离 orderbook 中位价 >5% 时改用中位价
+/// （波动币 last_trade 过时；中位价抗 zombie outlier）。
+fn anchor_filter(
+    state: &AppState,
+    symbol: &str,
+    book: &binance_alpha::OrderBookSnapshot,
+) -> binance_alpha::OrderBookSnapshot {
     let last_trade = state.recent_trades.last_price_for(symbol);
-    // V2.tune34: 用 orderbook 自身中位价校准 anchor。
-    // 波动币（如 QAIT）last_trade 可能严重过时（aggTrade 流没更新 / 价格快速移动），
-    // 离真实盘口 >5% 时会把整端真实档位砍光。orderbook 中位数 zombie 是少数 outlier，
-    // 天然抗它。规则：last_trade 离中位数 ±5% 内 → 信 last_trade（更精确）；否则用中位数。
-    let ob_median = orderbook_median_price(&book);
+    let ob_median = orderbook_median_price(book);
     let anchor = match (last_trade, ob_median) {
         (Some(lt), Some(med)) if med > Decimal::ZERO => {
             let dev = ((lt - med) / med).abs();
@@ -334,20 +357,7 @@ async fn get_orderbook_smart(
         (None, Some(med)) => Some(med),
         (None, None) => None,
     };
-    let filtered = filter_stale_levels(book.clone(), anchor);
-    // V2.tune33: 如果过滤把整个 bid 或 ask 端清空，说明 anchor 已经严重过时
-    // （市场快速波动，last_trade 离当前 best 价差 >5%）。这时用 raw 兜底，
-    // 不然 best_ask=0 会让 strategy 算出灾难性的 1e-8 价格 + 18 亿 qty。
-    if filtered.bids.is_empty() || filtered.asks.is_empty() {
-        tracing::warn!(
-            symbol, ?anchor,
-            raw_bids = book.bids.len(), raw_asks = book.asks.len(),
-            filt_bids = filtered.bids.len(), filt_asks = filtered.asks.len(),
-            "filter_stale_levels emptied bids/asks (anchor too stale) → fallback raw book"
-        );
-        return Ok(book);
-    }
-    Ok(filtered)
+    filter_stale_levels(book.clone(), anchor)
 }
 
 /// V2.tune15: 对称过滤双边 stale 残留。
