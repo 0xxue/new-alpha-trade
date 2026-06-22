@@ -416,6 +416,22 @@ pub fn usdt_funding_free(wallet: &SpotWallet) -> Option<Decimal> {
         .and_then(|e| e.funding.as_ref().map(|b| b.free))
 }
 
+/// wear 计算用：USDT 跨 spot + funding + earn 三个 bucket 的 free 总和。
+///
+/// 币安会把资金账户(funding)里闲置的 USDT **自动申购**进理财(flexible earn)。
+/// 旧的 `usdt_funding_free` 只看 funding，这种 funding→earn 的"搬家"会被 wear 误判成
+/// 交易亏损（实测 QAIT job：funding 252→218，~33 USDT 进 earn，wear 假算 -429 bps →
+/// 风控连续触发自动暂停）。baseline 与 current 都改用此口径后，earn 大额存量在两边抵消，
+/// wear 只反映真实交易盈亏。
+///
+/// 返回 None 仅当钱包里完全没有 USDT 条目。
+pub fn usdt_total_free(wallet: &SpotWallet) -> Option<Decimal> {
+    wallet.iter().find(|e| e.asset == "USDT").map(|e| {
+        let pick = |b: &Option<WalletBucket>| b.as_ref().map(|x| x.free).unwrap_or(Decimal::ZERO);
+        pick(&e.spot) + pick(&e.funding) + pick(&e.earn)
+    })
+}
+
 // =======================================================================
 // 成交回执（user-trades，wear 的明细凭证）
 // =======================================================================
@@ -528,6 +544,9 @@ mod tests {
         assert_eq!(w.len(), 2);
         let usdt = usdt_funding_free(&w).unwrap();
         assert_eq!(usdt, dec!(103.20318663));
+        // V2.tune38: total = spot(0) + funding(103.20318663) + earn(9207.42344884)
+        let total = usdt_total_free(&w).unwrap();
+        assert_eq!(total, dec!(9310.62663547));
     }
 
     #[test]

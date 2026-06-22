@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use binance_alpha::usdt_funding_free;
+use binance_alpha::{usdt_funding_free, usdt_total_free};
 use persistence::repo::{jobs, rounds, server_meta, stats};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -312,9 +312,11 @@ async fn trade_start(
     })?;
 
     // 拉 spot 余额做 wear baseline
+    // V2.tune38: baseline 取 USDT 总额(spot+funding+earn)，与 wear current 同口径，
+    // 否则币安把 funding USDT 自动申购进 earn 会被误判成亏损 → wear 风控假触发暂停。
     let wallet = s.alpha.get_spot_wallet(&auth).await.map_err(ApiErr::upstream)?;
-    let baseline = usdt_funding_free(&wallet).ok_or_else(|| {
-        ApiErr::upstream("could not read USDT.funding.free for wear baseline")
+    let baseline = usdt_total_free(&wallet).ok_or_else(|| {
+        ApiErr::upstream("could not read USDT balance for wear baseline")
     })?;
 
     // 把 baseline + min/max + base_asset 嵌到 params_json 里
@@ -402,7 +404,7 @@ async fn trade_stats(
                 .get_spot_wallet(&auth)
                 .await
                 .ok()
-                .and_then(|w| usdt_funding_free(&w));
+                .and_then(|w| usdt_total_free(&w)); // V2.tune38: 与 wear 同口径(总 USDT)
             let (qty, val) = match s.alpha.get_alpha_wallet(&auth).await {
                 Ok(w) => {
                     let base_asset: String = serde_json::from_str::<serde_json::Value>(&job.params_json)
@@ -567,20 +569,11 @@ async fn account_spot_balance(
         other => ApiErr::upstream(other),
     })?;
     let wallet = s.alpha.get_spot_wallet(&auth).await.map_err(ApiErr::upstream)?;
-    let usdt_funding = binance_alpha::usdt_funding_free(&wallet);
-    let usdt_total: rust_decimal::Decimal = wallet
-        .iter()
-        .find(|e| e.asset == "USDT")
-        .map(|e| {
-            let s = e.spot.as_ref().map(|b| b.free).unwrap_or_default();
-            let f = e.funding.as_ref().map(|b| b.free).unwrap_or_default();
-            let r = e.earn.as_ref().map(|b| b.free).unwrap_or_default();
-            s + f + r
-        })
-        .unwrap_or_default();
+    let usdt_funding = usdt_funding_free(&wallet);
+    let usdt_total = usdt_total_free(&wallet).unwrap_or_default();
     Ok(Json(json!({
-        "usdt_funding_free": usdt_funding,   // wear baseline 用这个
-        "usdt_total_free": usdt_total,
+        "usdt_funding_free": usdt_funding,
+        "usdt_total_free": usdt_total,       // V2.tune38: wear baseline/current 用这个
         "assets": wallet,
     })))
 }

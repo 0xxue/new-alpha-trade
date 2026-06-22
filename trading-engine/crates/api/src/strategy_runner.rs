@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use binance_alpha::{
-    usdt_funding_free, AuthBundle, CancelOrderRequest, OrderType, PaymentDetail, PlaceOrderRequest,
+    usdt_total_free, AuthBundle, CancelOrderRequest, OrderType, PaymentDetail, PlaceOrderRequest,
     PlaceOtoOrderRequest, Side, WalletType,
 };
 use persistence::repo::rounds;
@@ -593,11 +593,13 @@ async fn check_wear_pause(
         state.alpha.get_alpha_wallet(auth),
     );
 
+    // V2.tune38: USDT 取 spot+funding+earn 总和（见 usdt_total_free）。
+    // 币安自动把闲置 funding USDT 申购进 earn，只看 funding 会把搬家误判成亏损 → wear 假触发暂停。
     let current_spot = match spot_res {
-        Ok(w) => match usdt_funding_free(&w) {
+        Ok(w) => match usdt_total_free(&w) {
             Some(v) => v,
             None => {
-                warn!(%job_id, round, "wear check skipped: SPOT USDT.funding missing");
+                warn!(%job_id, round, "wear check skipped: SPOT USDT missing");
                 return false;
             }
         },
