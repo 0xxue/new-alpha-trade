@@ -338,9 +338,18 @@ async fn get_orderbook_smart(
     Ok(filtered)
 }
 
-/// V2.tune15/34/36：用 anchor 价对称过滤盘口 stale 残留。
-/// anchor 优先 last_trade（aggTrade，最精确），离 orderbook 中位价 >5% 时改用中位价
-/// （波动币 last_trade 过时；中位价抗 zombie outlier）。
+/// V2.tune15/34/36/37：用 anchor 价对称过滤盘口 stale 残留。
+///
+/// V2.tune37：anchor **以 orderbook 中位价为主**，last_trade 仅在中位价缺失时兜底。
+/// 中位价由全盘口价格取中，天然抗少量 zombie outlier，反映真实流动性中心。
+///
+/// 旧逻辑（tune15/34）优先 last_trade（aggTrade），认为它"最精确"。但低流动性币的
+/// last_trade 常滞后真实盘口：QAIT(ALPHA_980) 实测 last_trade=0.0209，而真实买/卖簇都在
+/// 0.02124（僵尸卖单孤立在 0.02057、僵尸买单孤立在 0.02210）。anchor=0.0209 卡在真实买盘
+/// 簇下方、且略偏向僵尸卖单一侧 → filter_stale_levels 的 post-cross tie-break（"离 anchor
+/// 远的一侧 = zombie"）把真实 bid 当成 zombie 逐个删光（filt_bids=0），却把真正的僵尸卖单
+/// 留作 best_ask → price sanity 死循环。anchor 与中位价仅差 1.6%（<5% 旧阈值），所以旧逻辑
+/// 没切回中位价。中位价 0.02124 才是真实中心 → 用它做 tie-break 能正确识别两侧 zombie。
 fn anchor_filter(
     state: &AppState,
     symbol: &str,
@@ -348,15 +357,19 @@ fn anchor_filter(
 ) -> binance_alpha::OrderBookSnapshot {
     let last_trade = state.recent_trades.last_price_for(symbol);
     let ob_median = orderbook_median_price(book);
-    let anchor = match (last_trade, ob_median) {
-        (Some(lt), Some(med)) if med > Decimal::ZERO => {
+    // 中位价优先；仅当盘口为空（中位价 None）才退化到 last_trade。
+    let anchor = ob_median.or(last_trade);
+    if let (Some(med), Some(lt)) = (ob_median, last_trade) {
+        if med > Decimal::ZERO {
             let dev = ((lt - med) / med).abs();
-            if dev <= Decimal::from_str("0.05").unwrap() { Some(lt) } else { Some(med) }
+            if dev > Decimal::from_str("0.02").unwrap_or(Decimal::ONE) {
+                tracing::debug!(
+                    symbol, anchor = %med, last_trade = %lt, dev = %dev,
+                    "anchor: last_trade 滞后中位价 >2%，以中位价为锚"
+                );
+            }
         }
-        (Some(lt), _) => Some(lt),
-        (None, Some(med)) => Some(med),
-        (None, None) => None,
-    };
+    }
     filter_stale_levels(book.clone(), anchor)
 }
 
