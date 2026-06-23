@@ -1,0 +1,6 @@
+# Windows batch scripts must use CRLF line endings when checked out.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must stay LF.
+*.sh text eol=lf

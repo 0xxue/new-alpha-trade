@@ -35,6 +35,21 @@ The trading engine runs an **OTO (One-Triggers-Other) smart strategy** with a de
 liquidation fallback. Order books are maintained locally from the `@depth@100ms` incremental
 WebSocket stream, with anchor-based stale-level filtering.
 
+## Windows one-click install
+
+For a non-developer running it on a Windows PC (no Rust/Visual Studio needed — the
+engine is shipped prebuilt via GitHub Releases). In an **empty folder**, open
+Command Prompt and run:
+
+```bat
+curl -L -o install.bat https://raw.githubusercontent.com/0xxue/new-alpha-trade/main/scripts/win/install.bat && install.bat
+```
+
+It installs Python / Git / Node.js (via `winget`), clones this repo, downloads the
+prebuilt `trading-engine.exe`, sets up the Python venv + Playwright Chromium and the
+web UI, then writes `start.bat`. Double-click **`start.bat`** to launch all three
+services and open http://localhost:5173 . Stop with `stop.bat`.
+
 ## Local development
 
 ```bash
@@ -112,5 +127,18 @@ Copy `.env.example` to `.env` and adjust as needed. The engine and qr-service re
 
 三个服务：`qr-service`（Python 扫码，7001）、`trading-engine`（Rust 引擎，7002）、`web-ui`（React 控制台，5173）。
 数据存 SQLite 单文件。引擎跑 OTO 智能策略（决策矩阵 + 阶梯降价清仓），盘口由 `@depth@100ms` 增量流本地维护。
+
+### Windows 一键安装（给非开发者）
+
+在一个**空文件夹**里打开「命令提示符（cmd）」，粘贴运行：
+
+```bat
+curl -L -o install.bat https://raw.githubusercontent.com/0xxue/new-alpha-trade/main/scripts/win/install.bat && install.bat
+```
+
+脚本会用 winget 自动装 Python / Git / Node.js，clone 本仓库，下载预编译好的
+`trading-engine.exe`（**无需装 Rust / Visual Studio**），配好 Python 虚拟环境 +
+Playwright 浏览器 + 前端依赖，并生成 `start.bat`。装完双击 **`start.bat`** 即可启动三个服务并自动打开
+http://localhost:5173 ；关闭用 `stop.bat`。先到「账户」页扫码登录，再到「交易」页刷量。
 
 本地开发和部署见上方英文段落。
