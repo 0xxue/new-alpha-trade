@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""new-alpha-trade Windows 安装器。
+"""new-alpha-trade Windows installer.
 
-由同目录的 install.bat 调用（install.bat 负责装好 Python/Git/Node 并 clone 仓库），
-也可在已 clone 的仓库里单独运行：  python scripts\\win\\install.py
+Called by scripts/win/install.bat (which installs Python/Git/Node and clones the
+repo first). Can also be run inside an already-cloned repo:
+    python scripts\\win\\install.py
 
-它做这些事（全部幂等，可重复跑）：
-  1. 从 GitHub Release 下载预编译的 trading-engine.exe  -> bin\\trading-engine.exe
-  2. 给 qr-service 建 Python 虚拟环境 + 装依赖 + 下载 Playwright Chromium
-  3. 给 web-ui 跑 npm install
-  4. 生成 start.bat / stop.bat（一键起停三服务）
+Idempotent. It:
+  1. Downloads the prebuilt trading-engine.exe from the latest GitHub Release
+     -> bin\\trading-engine.exe   (no Rust / Visual Studio needed)
+  2. Creates the qr-service Python venv + installs deps + Playwright Chromium
+  3. Runs npm install for web-ui
+  4. Writes start.bat / stop.bat
 
-引擎本身是 Rust 预编译好的，朋友的电脑【不需要】装 Rust / Visual Studio。
+NOTE: all console output here is ASCII English on purpose. Chinese text inside a
+.bat/.py run through cmd on a non-UTF-8 console gets mangled, so we keep the
+runnable scripts ASCII-only; the docs (README) stay bilingual.
 """
 from __future__ import annotations
 
@@ -24,9 +28,9 @@ import urllib.request
 from pathlib import Path
 
 # ----------------------------------------------------------------------------
-REPO = "0xxue/new-alpha-trade"          # GitHub 仓库
-ENGINE_ASSET = "trading-engine.exe"     # Release 里预编译引擎的资产名
-ROOT = Path(__file__).resolve().parents[2]   # 仓库根目录
+REPO = "0xxue/new-alpha-trade"          # GitHub repo
+ENGINE_ASSET = "trading-engine.exe"     # prebuilt engine asset name in Releases
+ROOT = Path(__file__).resolve().parents[2]   # repo root
 DATA = ROOT / "data"
 BIN = ROOT / "bin"
 # ----------------------------------------------------------------------------
@@ -47,7 +51,7 @@ def run(cmd, cwd: str | None = None) -> None:
 
 
 def download_engine() -> None:
-    step(f"下载预编译引擎 {ENGINE_ASSET}（GitHub Release，无需装 Rust）")
+    step(f"Downloading prebuilt engine {ENGINE_ASSET} (GitHub Release, no Rust needed)")
     BIN.mkdir(exist_ok=True)
     api = f"https://api.github.com/repos/{REPO}/releases/latest"
     req = urllib.request.Request(api, headers={"User-Agent": "nat-installer"})
@@ -57,20 +61,20 @@ def download_engine() -> None:
     asset = next((a for a in rel.get("assets", []) if a["name"] == ENGINE_ASSET), None)
     if asset is None:
         raise SystemExit(
-            f"[错误] 最新 Release（{tag}）里没有 {ENGINE_ASSET}。\n"
-            f"        请确认 https://github.com/{REPO}/releases 里上传了该文件。"
+            f"[ERROR] latest Release ({tag}) has no {ENGINE_ASSET}.\n"
+            f"        Check https://github.com/{REPO}/releases"
         )
     url = asset["browser_download_url"]
     dst = BIN / ENGINE_ASSET
-    log(f"{url}")
+    log(url)
     req2 = urllib.request.Request(url, headers={"User-Agent": "nat-installer"})
     with urllib.request.urlopen(req2, timeout=600) as r, open(dst, "wb") as f:
         shutil.copyfileobj(r, f)
-    log(f"完成：{dst}  ({dst.stat().st_size / 1e6:.1f} MB, 版本 {tag})")
+    log(f"done: {dst}  ({dst.stat().st_size / 1e6:.1f} MB, version {tag})")
 
 
 def setup_qr_service() -> None:
-    step("配置扫码服务（Python 虚拟环境 + 依赖 + Playwright 浏览器）")
+    step("Setting up qr-service (Python venv + deps + Playwright Chromium)")
     qr = ROOT / "qr-service"
     venv = qr / ".venv"
     if not (venv / "Scripts" / "python.exe").exists():
@@ -78,33 +82,32 @@ def setup_qr_service() -> None:
     py = str(venv / "Scripts" / "python.exe")
     run([py, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
     run([py, "-m", "pip", "install", "--quiet", "-e", "."], cwd=str(qr))
-    # 下载无头浏览器（约 150MB，首次较慢）
+    # downloads the headless browser (~150MB, slow on first run)
     run([py, "-m", "playwright", "install", "chromium"])
 
 
 def setup_web_ui() -> None:
-    step("配置前端（npm install，首次较慢）")
+    step("Setting up web-ui (npm install, slow on first run)")
     web = ROOT / "web-ui"
     npm = "npm.cmd" if os.name == "nt" else "npm"
     run([npm, "install"], cwd=str(web))
 
 
 def write_launchers() -> None:
-    step("生成启动脚本 start.bat / stop.bat")
+    step("Writing start.bat / stop.bat")
     DATA.mkdir(exist_ok=True)
-    (ROOT / "start.bat").write_text(START_BAT, encoding="utf-8")
-    (ROOT / "stop.bat").write_text(STOP_BAT, encoding="utf-8")
+    (ROOT / "start.bat").write_text(START_BAT, encoding="ascii")
+    (ROOT / "stop.bat").write_text(STOP_BAT, encoding="ascii")
     log(str(ROOT / "start.bat"))
     log(str(ROOT / "stop.bat"))
 
 
 START_BAT = r"""@echo off
-chcp 65001 >nul
 setlocal
 set "ROOT=%~dp0"
 if not exist "%ROOT%data" mkdir "%ROOT%data"
 
-rem ===== 共享环境变量（绝对路径，保证引擎和扫码服务用同一个数据库）=====
+rem ===== shared env (absolute paths so engine and qr-service share one DB) =====
 set "DB_PATH=%ROOT%data\new-alpha-trade.db"
 set "QR_DIR=%ROOT%data\qr"
 set "FACE_QR_DIR=%ROOT%data\face_qr"
@@ -113,53 +116,52 @@ set "PLAYWRIGHT_HEADLESS=true"
 set "QR_SERVICE_URL=http://127.0.0.1:7001"
 set "PORT=7002"
 
-echo [1/3] 启动交易引擎  http://127.0.0.1:7002 ...
+echo [1/3] starting trading engine  http://127.0.0.1:7002 ...
 start "nat-engine" cmd /k ""%ROOT%bin\trading-engine.exe""
 timeout /t 4 /nobreak >nul
 
-echo [2/3] 启动扫码服务  http://127.0.0.1:7001 ...
+echo [2/3] starting qr service      http://127.0.0.1:7001 ...
 start "nat-qr" cmd /k ""%ROOT%qr-service\.venv\Scripts\python.exe" -m uvicorn qr_service.main:app --host 127.0.0.1 --port 7001"
 timeout /t 3 /nobreak >nul
 
-echo [3/3] 启动前端界面  http://localhost:5173 ...
+echo [3/3] starting web ui          http://localhost:5173 ...
 start "nat-web" cmd /k "cd /d "%ROOT%web-ui" && npm run dev"
 timeout /t 6 /nobreak >nul
 
 start "" http://localhost:5173
 echo.
 echo ============================================================
-echo   已启动三个窗口：nat-engine / nat-qr / nat-web
-echo   浏览器已打开  http://localhost:5173
-echo   先去【账户】页扫码登录，再到【交易】页刷量。
-echo   停止：双击 stop.bat，或直接关掉那三个黑窗口。
+echo   Started 3 windows: nat-engine / nat-qr / nat-web
+echo   Browser opened at  http://localhost:5173
+echo   Scan QR on the Accounts page, then trade on the Trade page.
+echo   To stop: run stop.bat, or just close the 3 black windows.
 echo ============================================================
 pause
 """
 
 STOP_BAT = r"""@echo off
-chcp 65001 >nul
-echo 正在停止 new-alpha-trade ...
+echo Stopping new-alpha-trade ...
 taskkill /F /IM trading-engine.exe >nul 2>nul
 taskkill /F /T /FI "WINDOWTITLE eq nat-engine*" >nul 2>nul
 taskkill /F /T /FI "WINDOWTITLE eq nat-qr*" >nul 2>nul
 taskkill /F /T /FI "WINDOWTITLE eq nat-web*" >nul 2>nul
-echo 已停止。
+echo Stopped.
 timeout /t 2 >nul
 """
 
 
 def main() -> None:
     print("============================================================")
-    print("  new-alpha-trade Windows 安装器")
-    print(f"  仓库目录: {ROOT}")
+    print("  new-alpha-trade Windows installer")
+    print(f"  repo dir: {ROOT}")
     print("============================================================")
     download_engine()
     setup_qr_service()
     setup_web_ui()
     write_launchers()
     print("\n============================================================")
-    print("  ✅ 安装完成！")
-    print(f"  双击启动:  {ROOT / 'start.bat'}")
+    print("  DONE.")
+    print(f"  Double-click to start:  {ROOT / 'start.bat'}")
     print("============================================================")
 
 
@@ -167,5 +169,5 @@ if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as e:
-        print(f"\n[错误] 命令执行失败（退出码 {e.returncode}）：{e.cmd}", file=sys.stderr)
+        print(f"\n[ERROR] command failed (exit {e.returncode}): {e.cmd}", file=sys.stderr)
         sys.exit(1)
