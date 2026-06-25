@@ -106,16 +106,36 @@ server {
     listen [::]:80 default_server;
     server_name _;
     client_max_body_size 8m;
-    auth_basic "new-alpha-trade";
-    auth_basic_user_file /etc/nginx/.htpasswd;
-    location = /api/health    { auth_basic off; proxy_pass http://127.0.0.1:7002/health; proxy_set_header Host $host; }
-    location = /api/qr/health { auth_basic off; proxy_pass http://127.0.0.1:7001/health; proxy_set_header Host $host; }
+
     root /opt/new-alpha-trade/web-ui/dist;
     index index.html;
+
+    # 静态前端：放开（登录在 app 内做，不再弹浏览器原生登录框）
     location / { try_files $uri $uri/ /index.html; }
-    location /api/qr/ { rewrite ^/api/qr/(.*)$ /$1 break; proxy_pass http://127.0.0.1:7001; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 120s; }
-    location /api/    { rewrite ^/api/(.*)$ /$1 break;    proxy_pass http://127.0.0.1:7002; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 30s; }
-    location /ws/     { proxy_pass http://127.0.0.1:7002; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host $host; proxy_read_timeout 86400s; }
+
+    # 健康检查：放开
+    location = /api/health    { proxy_pass http://127.0.0.1:7002/health; proxy_set_header Host $host; }
+    location = /api/qr/health { proxy_pass http://127.0.0.1:7001/health; proxy_set_header Host $host; }
+
+    # API：Basic Auth 保护（前端登录后自动带 Authorization 头）
+    location /api/qr/ {
+        auth_basic "new-alpha-trade";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        rewrite ^/api/qr/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:7001; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 120s;
+    }
+    location /api/ {
+        auth_basic "new-alpha-trade";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:7002; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 30s;
+    }
+    # WS：放开（只读行情/订单流，浏览器 WebSocket 不便带认证头）
+    location /ws/ {
+        proxy_pass http://127.0.0.1:7002; proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host; proxy_read_timeout 86400s;
+    }
 }
 NGINX
 sudo ln -sf /etc/nginx/sites-available/new-alpha-trade /etc/nginx/sites-enabled/new-alpha-trade

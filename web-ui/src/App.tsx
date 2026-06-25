@@ -5,6 +5,7 @@ import Trade from "./pages/Trade";
 import Strategy from "./pages/Strategy";
 import Login from "./pages/Login";
 import ServerExpiryCard from "./components/ServerExpiryCard";
+import { logout } from "./auth";
 
 const navItems = [
   { path: "/", label: "Dashboard" },
@@ -34,8 +35,14 @@ function Shell() {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto">
+        <div className="mt-auto space-y-2">
           <ServerExpiryCard />
+          <button
+            onClick={logout}
+            className="w-full text-xs text-neutral-500 hover:text-neutral-300 border border-neutral-800 rounded px-2 py-1.5"
+          >
+            退出登录
+          </button>
         </div>
       </aside>
 
@@ -50,6 +57,12 @@ function Shell() {
               </NavLink>
             ))}
           </nav>
+          <button
+            onClick={logout}
+            className="ml-auto text-xs text-neutral-500 hover:text-neutral-300 whitespace-nowrap px-2 py-1"
+          >
+            退出
+          </button>
         </div>
       </header>
 
