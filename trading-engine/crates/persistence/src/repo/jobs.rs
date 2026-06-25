@@ -106,3 +106,15 @@ pub async fn set_state(pool: &SqlitePool, id: &str, state: JobState) -> sqlx::Re
     .await?;
     Ok(r.rows_affected() > 0)
 }
+
+/// 覆盖整条 params_json（wear 自动重置基线用）。
+pub async fn set_params_json(pool: &SqlitePool, id: &str, params_json: &str) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE jobs SET params_json = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(params_json)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}

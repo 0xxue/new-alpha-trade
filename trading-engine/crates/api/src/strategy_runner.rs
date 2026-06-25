@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use binance_alpha::{
-    usdt_total_free, AuthBundle, CancelOrderRequest, OrderType, PaymentDetail, PlaceOrderRequest,
+    usdt_funding_free, AuthBundle, CancelOrderRequest, OrderType, PaymentDetail, PlaceOrderRequest,
     PlaceOtoOrderRequest, Side, WalletType,
 };
 use persistence::repo::rounds;
@@ -593,13 +593,15 @@ async fn check_wear_pause(
         state.alpha.get_alpha_wallet(auth),
     );
 
-    // V2.tune38: USDT 取 spot+funding+earn 总和（见 usdt_total_free）。
-    // 币安自动把闲置 funding USDT 申购进 earn，只看 funding 会把搬家误判成亏损 → wear 假触发暂停。
+    // V2.tune39: USDT 只算【资金账户 funding.free】（用户要求：funding 才是真正刷量本金）。
+    // 前提：账户须关闭"自动申购/理财自动转入"，否则 funding→earn 搬家会被误判成亏损。
+    // tune38 曾改成 spot+funding+earn 加总来对冲自动申购，但那样数字混入理财大额存款、且
+    // 资金↔合约 搬动仍漏算。回到 funding-only + 用户关自动申购，是最干净的口径。
     let current_spot = match spot_res {
-        Ok(w) => match usdt_total_free(&w) {
+        Ok(w) => match usdt_funding_free(&w) {
             Some(v) => v,
             None => {
-                warn!(%job_id, round, "wear check skipped: SPOT USDT missing");
+                warn!(%job_id, round, "wear check skipped: SPOT USDT.funding missing");
                 return false;
             }
         },
@@ -670,6 +672,29 @@ async fn check_wear_pause(
         %baseline, %vol, %wear, %bps,
         "wear check"
     );
+
+    // V2.tune39: 自动愈合旧口径基线。
+    // 老 job 的 baseline 是按 spot+funding+earn 加总（tune38）记的，混入理财大额存款；
+    // 切到 funding-only 后 current 只剩资金账户 → baseline 远大于当前值 → wear 巨负 → 会秒暂停。
+    // 规则：baseline > 当前总值 × 2，判定为旧口径残留 → 重置为当前值，本轮不暂停。
+    // 好处：任意服务器"拉新代码 + 重启"后，resume 的 job 首次 wear check 自动校正，无需手动改库。
+    // （这也顺带兼容用户手动从资金账户提走大额 → 不会被误判成交易亏损）
+    if baseline > total_value * Decimal::from(2) {
+        warn!(
+            %job_id, round, %baseline, %total_value,
+            "baseline 口径不符(疑似旧 total-USDT 残留) → 自动重置为当前 funding 口径值，本轮不暂停"
+        );
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&job.params_json) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "_baseline_spot_usdt".into(),
+                    serde_json::Value::String(total_value.to_string()),
+                );
+                let _ = jobs::set_params_json(&state.db, job_id, &v.to_string()).await;
+            }
+        }
+        return false;
+    }
 
     // V2.tune22: 不在这里直接 pause —— 由 caller (check_risk_and_pause) 累计连续触发次数后才 pause
     bps <= WEAR_PAUSE_BPS_THRESHOLD

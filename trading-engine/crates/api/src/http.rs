@@ -312,11 +312,11 @@ async fn trade_start(
     })?;
 
     // 拉 spot 余额做 wear baseline
-    // V2.tune38: baseline 取 USDT 总额(spot+funding+earn)，与 wear current 同口径，
-    // 否则币安把 funding USDT 自动申购进 earn 会被误判成亏损 → wear 风控假触发暂停。
+    // V2.tune39: baseline 只取【资金账户 funding.free】（用户要求 funding 才是刷量本金）。
+    // 须配合账户关闭"自动申购"，否则 funding→earn 搬家会被误判成亏损。
     let wallet = s.alpha.get_spot_wallet(&auth).await.map_err(ApiErr::upstream)?;
-    let baseline = usdt_total_free(&wallet).ok_or_else(|| {
-        ApiErr::upstream("could not read USDT balance for wear baseline")
+    let baseline = usdt_funding_free(&wallet).ok_or_else(|| {
+        ApiErr::upstream("could not read USDT.funding.free for wear baseline")
     })?;
 
     // 把 baseline + min/max + base_asset 嵌到 params_json 里
@@ -404,7 +404,7 @@ async fn trade_stats(
                 .get_spot_wallet(&auth)
                 .await
                 .ok()
-                .and_then(|w| usdt_total_free(&w)); // V2.tune38: 与 wear 同口径(总 USDT)
+                .and_then(|w| usdt_funding_free(&w)); // V2.tune39: 与 wear 同口径(仅资金 funding)
             let (qty, val) = match s.alpha.get_alpha_wallet(&auth).await {
                 Ok(w) => {
                     let base_asset: String = serde_json::from_str::<serde_json::Value>(&job.params_json)
