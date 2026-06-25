@@ -47,8 +47,13 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # Node.js 20（NodeSource）。Ubuntu 22.04 的 apt nodejs 是 v12，跑不了新版 tsc/vite，必须装新的。
 if ! node -v 2>/dev/null | grep -qE '^v(18|20|22|24)'; then
   echo "  安装 Node.js 20 (NodeSource) ..."
+  # 先清掉 apt 的旧 nodejs/npm，否则和 NodeSource 包抢文件导致 dpkg 冲突
+  sudo apt-get purge -y nodejs npm libnode-dev libnode72 >/dev/null 2>&1 || true
+  sudo apt-get autoremove -y >/dev/null 2>&1 || true
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >/dev/null 2>&1 || fail nodesource
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null || fail node-install
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null 2>&1 \
+    || { sudo dpkg --configure -a >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken nodejs >/dev/null 2>&1; } \
+    || fail node-install
 fi
 echo "node=$(node -v) npm=$(npm -v)"
 
