@@ -31,6 +31,10 @@ fail(){ echo "!! FAILED at: $*" >&2; exit 1; }
 phase "0/11 检查环境"
 command -v sudo >/dev/null || fail "需要 sudo"
 sudo -n true 2>/dev/null || fail "当前用户没有免密 sudo"
+# 防 needrestart 交互提示（Ubuntu 22.04+ 装包后会弹"重启哪些服务"）
+export NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive
+# 停掉开机自动安全更新，避免它占着 apt 锁导致本脚本失败
+sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
 
 phase "0.5 swap（防低内存编译 OOM）"
 if ! sudo swapon --show | grep -q .; then
