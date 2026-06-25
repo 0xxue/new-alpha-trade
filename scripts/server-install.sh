@@ -42,7 +42,14 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null || fail apt-upd
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3 python3-venv python3-pip nginx sqlite3 \
   build-essential pkg-config libssl-dev \
-  curl git ca-certificates nodejs npm apache2-utils >/dev/null || fail apt-install
+  curl git ca-certificates apache2-utils >/dev/null || fail apt-install
+
+# Node.js 20（NodeSource）。Ubuntu 22.04 的 apt nodejs 是 v12，跑不了新版 tsc/vite，必须装新的。
+if ! node -v 2>/dev/null | grep -qE '^v(18|20|22|24)'; then
+  echo "  安装 Node.js 20 (NodeSource) ..."
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >/dev/null 2>&1 || fail nodesource
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null || fail node-install
+fi
 echo "node=$(node -v) npm=$(npm -v)"
 
 phase "2/11 Rust toolchain"
