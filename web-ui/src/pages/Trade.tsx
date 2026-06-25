@@ -52,6 +52,7 @@ export default function Trade() {
   const [strategy, setStrategy] = useState<"oto" | "oto_smart" | "simple_round">("oto_smart");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [jobPage, setJobPage] = useState(0); // 任务列表分页（每页 5 条）
 
   // tokens registry
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
@@ -158,9 +159,15 @@ export default function Trade() {
     }
   };
 
+  // 任务列表分页（每页 5 条），避免手机上一长串要拖很久
+  const JOB_PAGE_SIZE = 5;
+  const totalJobPages = Math.max(1, Math.ceil(jobs.length / JOB_PAGE_SIZE));
+  const curJobPage = Math.min(jobPage, totalJobPages - 1);
+  const pagedJobs = jobs.slice(curJobPage * JOB_PAGE_SIZE, curJobPage * JOB_PAGE_SIZE + JOB_PAGE_SIZE);
+
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-6">交易任务</h1>
+      <h1 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6">交易任务</h1>
 
       {/* 创建表单 */}
       <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 mb-6 max-w-5xl">
@@ -289,8 +296,8 @@ export default function Trade() {
           {jobs.length === 0 && (
             <div className="text-sm text-neutral-600 p-4 text-center">还没有任务</div>
           )}
-          <div className="space-y-1">
-            {jobs.map((j) => {
+          <div className="space-y-1 max-h-[55vh] sm:max-h-[340px] overflow-y-auto pr-1">
+            {pagedJobs.map((j) => {
               const cls = STATE_COLOR[j.state] ?? "bg-neutral-700/30 text-neutral-300";
               const selected = j.id === selectedId;
               return (
@@ -317,6 +324,28 @@ export default function Trade() {
               );
             })}
           </div>
+
+          {totalJobPages > 1 && (
+            <div className="flex items-center justify-between mt-2 pt-2 border-t border-neutral-800 text-xs">
+              <button
+                onClick={() => setJobPage((p) => Math.max(0, p - 1))}
+                disabled={curJobPage === 0}
+                className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30"
+              >
+                ← 上一页
+              </button>
+              <span className="text-neutral-500">
+                第 {curJobPage + 1}/{totalJobPages} 页
+              </span>
+              <button
+                onClick={() => setJobPage((p) => Math.min(totalJobPages - 1, p + 1))}
+                disabled={curJobPage >= totalJobPages - 1}
+                className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30"
+              >
+                下一页 →
+              </button>
+            </div>
+          )}
         </div>
 
         {/* stats 详情 */}
