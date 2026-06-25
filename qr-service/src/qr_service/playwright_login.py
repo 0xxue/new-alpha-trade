@@ -154,6 +154,16 @@ class LoginSessionManager:
             self._playwright = None
 
     def start_login(self, username: str) -> LoginSession:
+        # 关键：同一账号同时只允许一个登录会话。否则反复点扫码/刷新会开多个 chromium，
+        # 全挤在同一个 user_data_dir 上互相抢锁 → 浏览器堆积 + 内存耗尽 + 二维码时好时坏。
+        for old in list(self.sessions.values()):
+            if old.username == username and old.status in ("pending", "qr_ready", "scanned"):
+                old._cancel_event.set()
+                if old._task and not old._task.done():
+                    old._task.cancel()
+                logger.info(
+                    "[%s] 取消同账号旧会话 %s（避免浏览器堆积）", username, old.session_id[:8]
+                )
         sess = LoginSession(session_id=str(uuid.uuid4()), username=username)
         self.sessions[sess.session_id] = sess
         sess._task = asyncio.create_task(self._run(sess), name=f"login-{username}-{sess.session_id[:8]}")
