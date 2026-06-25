@@ -55,25 +55,20 @@ delete window.__PW_inspect;
 window.chrome = window.chrome || { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
 """
 
-# 2026-06 币安改版：二维码渲染在 hover 弹层 .qrcode-login-popup 里（不再整页切换）
 QR_SELECTORS = [
-    ".qrcode-login-popup canvas",
-    ".qrcode-login-popup",
     '[aria-label="QR Code status"]',
     '[aria-label="二维码状态"]',
-    "canvas",
+    'canvas',
 ]
-
-# 二维码切换图标（hover 它弹出二维码弹层）
-QR_TOGGLE_SELECTOR = '.qr-login-icon, [aria-label="二维码登录"], [aria-label="QR Code Login"]'
 
 # Binance 时不时改 HTML，多准备几个变体覆盖中英文 + 新旧 class
 QR_LOGIN_BUTTON_SELECTORS = [
-    ".qr-login-icon",
+    # 2026-06 实测有效（点它会弹出真二维码 canvas）
     '[aria-label="二维码登录"]',
     '[aria-label="QR Code Login"]',
     '[aria-label="QR code login"]',
     '[aria-label="QR Login"]',
+    ".qr-login-icon",  # 旧 class，有时能点到但不弹二维码 → 靠下面 canvas 校验兜底
     'button[class*="qr-login"]',
     'svg[class*="qr-login"]',
     # 通用：登录表单旁的"二维码图标"，按位置选（form 内右上角的 button/div）
@@ -305,7 +300,8 @@ class LoginSessionManager:
         return clicked
 
     async def _click_qr_button(self, page: Page, sess: LoginSession) -> None:
-        # 旧项目里这一步常常失败但页面其实已经默认是扫码模式，所以 best-effort
+        # 点二维码切换图标。关键：有的 selector（如 .qr-login-icon）能点到但不弹出二维码，
+        # 所以点完必须验证真二维码 <canvas> 是否出现，没出现就继续试下一个 selector。
         for _ in range(5):
             for selector in QR_LOGIN_BUTTON_SELECTORS:
                 try:
@@ -313,8 +309,18 @@ class LoginSessionManager:
                     if await btn.is_visible(timeout=500):
                         await btn.click()
                         await asyncio.sleep(1.5)
-                        logger.info("[%s] clicked QR login button (%s)", sess.username, selector)
-                        return
+                        try:
+                            if await page.locator("canvas").first.is_visible(timeout=1500):
+                                logger.info(
+                                    "[%s] clicked QR button (%s) → 二维码 canvas 已出现",
+                                    sess.username, selector,
+                                )
+                                return
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.info(
+                            "[%s] clicked %s 但没弹出二维码，试下一个", sess.username, selector
+                        )
                 except Exception:  # noqa: BLE001
                     continue
             await asyncio.sleep(1)
@@ -381,19 +387,9 @@ class LoginSessionManager:
             pass
         logger.info("[%s] QR login button not found (assume default QR mode)", sess.username)
 
-    async def _hover_qr_toggle(self, page: Page) -> None:
-        """hover 二维码切换图标，让 .qrcode-login-popup 弹层出现并保持（新版是 hover tooltip）。"""
-        try:
-            await page.locator(QR_TOGGLE_SELECTOR).first.hover(timeout=2000)
-        except Exception:  # noqa: BLE001
-            pass
-
     async def _wait_for_qr(self, page: Page, sess: LoginSession) -> None:
         # 两轮 attempt：第一轮失败 → reload 页面 + 重新点 QR 按钮再试
         for attempt in range(2):
-            # 新版二维码在 hover 弹层里 → 先 hover 切换图标让它出现
-            await self._hover_qr_toggle(page)
-            await asyncio.sleep(1.2)
             for _ in range(20):
                 for selector in QR_SELECTORS:
                     try:
@@ -404,8 +400,6 @@ class LoginSessionManager:
                             return
                     except Exception:  # noqa: BLE001
                         continue
-                # 持续 hover 防止 tooltip 弹层关闭
-                await self._hover_qr_toggle(page)
                 await asyncio.sleep(1)
             if attempt == 0:
                 # 第一轮没找到 → reload + 重试点 QR 按钮
@@ -423,18 +417,6 @@ class LoginSessionManager:
 
     async def _take_qr_screenshot(self, page: Page, sess: LoginSession) -> None:
         path = self.qr_dir / f"{sess.session_id}.png"
-        # 优先截二维码弹层（干净、好扫）；弹层是 hover tooltip，截前先 hover 保持
-        try:
-            await self._hover_qr_toggle(page)
-            await asyncio.sleep(0.4)
-            popup = page.locator(".qrcode-login-popup").first
-            if await popup.is_visible(timeout=600):
-                await popup.screenshot(path=str(path))
-                sess.qr_image_path = path
-                return
-        except Exception:  # noqa: BLE001
-            pass
-        # 兜底：截整页
         await page.screenshot(path=str(path))
         sess.qr_image_path = path
         sess.last_qr_refresh = time.time()
