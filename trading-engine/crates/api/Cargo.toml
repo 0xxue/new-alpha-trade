@@ -21,6 +21,7 @@ uuid.workspace = true
 rust_decimal.workspace = true
 sqlx.workspace = true
 rand.workspace = true
+bcrypt = "0.15"
 
 [dev-dependencies]
 rust_decimal_macros = "1.35"

@@ -99,7 +99,17 @@ phase "9/11 env + systemd + nginx + Basic Auth"
 sudo cp -f "$SRC/scripts/systemd/nat-trading-engine.service" /etc/systemd/system/
 sudo cp -f "$SRC/scripts/systemd/nat-qr-service.service" /etc/systemd/system/
 sudo sed -i 's#ExecStart=/opt/new-alpha-trade/trading-engine$#ExecStart=/opt/new-alpha-trade/bin/trading-engine#' /etc/systemd/system/nat-trading-engine.service
-sudo htpasswd -bc /etc/nginx/.htpasswd "$BASIC_USER" "$BASIC_PASS" >/dev/null 2>&1 || fail htpasswd
+# Basic Auth 密码文件放到 APP_DIR/data(引擎可写,支持「网页改密码」原地写;不在 systemd
+# ProtectSystem=full 的 /etc 只读范围)。仅当不存在时初始化(升级不覆盖已改的密码);bcrypt($2y$)。
+HTPASSWD_FILE=/opt/new-alpha-trade/data/htpasswd
+if [ ! -f "$HTPASSWD_FILE" ]; then
+  sudo htpasswd -bcB "$HTPASSWD_FILE" "$BASIC_USER" "$BASIC_PASS" >/dev/null 2>&1 || fail htpasswd
+fi
+sudo chmod 644 "$HTPASSWD_FILE"   # nginx(www-data)可读;owner(下方 chown -R 给 app)可写
+# 引擎需要知道用户名 + htpasswd 路径(改密码端点用)。幂等写入 env。
+sudo sed -i '/^BASIC_USER=/d; /^HTPASSWD_PATH=/d' /etc/new-alpha-trade/trading-engine.env
+echo "BASIC_USER=$BASIC_USER"                          | sudo tee -a /etc/new-alpha-trade/trading-engine.env >/dev/null
+echo "HTPASSWD_PATH=/opt/new-alpha-trade/data/htpasswd" | sudo tee -a /etc/new-alpha-trade/trading-engine.env >/dev/null
 sudo tee /etc/nginx/sites-available/new-alpha-trade >/dev/null <<'NGINX'
 server {
     listen 80 default_server;
@@ -120,13 +130,13 @@ server {
     # API：Basic Auth 保护（前端登录后自动带 Authorization 头）
     location /api/qr/ {
         auth_basic "new-alpha-trade";
-        auth_basic_user_file /etc/nginx/.htpasswd;
+        auth_basic_user_file /opt/new-alpha-trade/data/htpasswd;
         rewrite ^/api/qr/(.*)$ /$1 break;
         proxy_pass http://127.0.0.1:7001; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 120s;
     }
     location /api/ {
         auth_basic "new-alpha-trade";
-        auth_basic_user_file /etc/nginx/.htpasswd;
+        auth_basic_user_file /opt/new-alpha-trade/data/htpasswd;
         rewrite ^/api/(.*)$ /$1 break;
         proxy_pass http://127.0.0.1:7002; proxy_http_version 1.1; proxy_set_header Host $host; proxy_read_timeout 30s;
     }

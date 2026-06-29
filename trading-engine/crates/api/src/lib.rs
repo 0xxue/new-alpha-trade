@@ -1,5 +1,6 @@
 //! HTTP + WebSocket API 层（axum）。
 
+pub mod change_password;
 pub mod decision;
 pub mod http;
 pub mod orders;
@@ -54,6 +55,7 @@ pub fn router(
     Router::new()
         .merge(http::routes())
         .merge(orders::routes())
+        .merge(change_password::routes())
         .nest("/ws", ws::routes())
         .with_state(state)
 }

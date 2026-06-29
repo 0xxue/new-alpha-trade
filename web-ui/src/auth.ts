@@ -33,12 +33,19 @@ export function installFetchAuth(): void {
           : (input as Request).url;
     const creds = getCreds();
     const isApi = url.startsWith("/api") || url.includes("/api/");
-    if (creds && isApi) {
+    if (isApi) {
+      init = { ...init };
       const headers = new Headers(
-        init?.headers ?? (input instanceof Request ? input.headers : undefined)
+        init.headers ?? (input instanceof Request ? input.headers : undefined)
       );
-      if (!headers.has("Authorization")) headers.set("Authorization", `Basic ${creds}`);
-      init = { ...init, headers };
+      if (creds && !headers.has("Authorization")) headers.set("Authorization", `Basic ${creds}`);
+      init.headers = headers;
+      // 防止请求永久挂起（网络抽风时"创建中"卡死）→ 25s 自动中止并报错
+      if (!init.signal) {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 25000);
+        init.signal = ctrl.signal;
+      }
     }
     return orig(input as RequestInfo, init);
   };

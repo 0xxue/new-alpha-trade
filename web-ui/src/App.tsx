@@ -3,6 +3,7 @@ import Dashboard from "./pages/Dashboard";
 import Accounts from "./pages/Accounts";
 import Trade from "./pages/Trade";
 import Strategy from "./pages/Strategy";
+import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import ServerExpiryCard from "./components/ServerExpiryCard";
 import { logout } from "./auth";
@@ -12,6 +13,7 @@ const navItems = [
   { path: "/accounts", label: "账户" },
   { path: "/trade", label: "交易" },
   { path: "/strategy", label: "策略" },
+  { path: "/settings", label: "设置" },
 ];
 
 function navClass(isActive: boolean): string {
@@ -72,6 +74,7 @@ function Shell() {
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/trade" element={<Trade />} />
           <Route path="/strategy" element={<Strategy />} />
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
     </div>
