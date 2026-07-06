@@ -59,6 +59,10 @@ pub struct DecisionParams {
     /// V2.tune5：spread > 此值 → WaitForBetter（等好时机）
     /// NEX 上 1 tick ≈ 2 bps，max=2 表示愿意接受 ≤4 bps spread
     pub max_quality_spread_ticks: u32,
+    /// V2.tune40：按币价 bps 的点差门槛（Some 时启用）。spread/best_bid*1e4 > 此值 → WaitForBetter。
+    /// 解决固定 tick 门槛对不同币价失效的问题（NEX tick=1e-9 极小 → tick 门槛永不触发；
+    /// 而按 bps 对所有币价一视同仁）。每-job 通过 params_json `_quality_spread_bps` 开启。
+    pub max_quality_spread_bps: Option<u32>,
     /// V2.tune5：最近 N 笔成交价格 range > 此值 ticks → WaitForBetter
     /// 价格剧烈波动时 OTO 容易 timeout/部分成交，避开
     pub max_quality_volatility_ticks: u32,
@@ -80,6 +84,7 @@ impl Default for DecisionParams {
             // 100% skip 卡死。先放宽到 99999 关闭 quality gate（行为退化为原 V2 fast）。
             // 等 LiveOrderBook 数据稳定后再启用更小阈值精筛。
             max_quality_spread_ticks: 99999,
+            max_quality_spread_bps: None,
             max_quality_volatility_ticks: 99999,
             volatility_window: 8,
         }
@@ -503,6 +508,14 @@ pub fn evaluate(
     } else {
         (spread_dec / tick_size).to_u32().unwrap_or(0)
     };
+    // V2.tune40：按币价 bps 的点差（跨不同币价一视同仁的质量门槛用）
+    let spread_bps: u32 = if best_bid > Decimal::ZERO {
+        ((spread_dec / best_bid) * Decimal::from(10000))
+            .to_u32()
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let imbalance = book_imbalance(book, p.book_depth_levels).unwrap_or(0.5);
     let trend = trend_signal(recent, p.trend_window);
     // V2.tune5：算市场波动率（最近 N 笔成交价 max-min）
@@ -519,7 +532,8 @@ pub fn evaluate(
     // 注意：放在 SkipBearish 之后但在 maker/fast 决策之前
     // SkipBearish 是结构性看空（继续刷会拉低市场），WaitForBetter 是临时性流动性差
     let quality_bad = spread_ticks > p.max_quality_spread_ticks
-        || volatility > p.max_quality_volatility_ticks;
+        || volatility > p.max_quality_volatility_ticks
+        || p.max_quality_spread_bps.map_or(false, |m| spread_bps > m);
 
     // 实验性优化 A：放宽 SmallSpreadFollow 触发（把更多 fast 流量导到 maker pending）。
     // 默认关闭（保守的原始决策矩阵已充分验证 ~-4 bps）。
@@ -560,6 +574,7 @@ pub fn evaluate(
         .unwrap_or(Decimal::ZERO);
     let ctx = DecisionContext {
         spread_ticks,
+        spread_bps,
         imbalance,
         trend,
         best_bid,
@@ -573,6 +588,7 @@ pub fn evaluate(
 #[derive(Debug, Clone, Copy)]
 pub struct DecisionContext {
     pub spread_ticks: u32,
+    pub spread_bps: u32,
     pub imbalance: f64,
     pub trend: i32,
     pub best_bid: Decimal,
@@ -716,6 +732,32 @@ mod tests {
         let b = book(&[("100", "100")], &[("101", "100")]); // spread=1
         let (d, _) = evaluate(&b, &trades(&[false, true, false, true]), dec!(1), &p);
         assert_eq!(d, Decision::Fast);
+    }
+
+    // V2.tune40: 按 bps 的点差门槛
+    #[test]
+    fn decision_wait_for_better_on_wide_spread_bps() {
+        // spread=5, best_bid=100 → spread_bps = 5/100*1e4 = 500 bps；门槛 100 → 触发跳过
+        let p = DecisionParams {
+            max_quality_spread_bps: Some(100),
+            ..DecisionParams::default()
+        };
+        let b = book(&[("100", "100")], &[("105", "100")]);
+        let (d, ctx) = evaluate(&b, &trades(&[false, true, false]), dec!(1), &p);
+        assert_eq!(ctx.spread_bps, 500);
+        assert_eq!(d, Decision::WaitForBetter);
+    }
+
+    #[test]
+    fn decision_bps_gate_passes_when_tight() {
+        // spread=1, best_bid=100 → 100 bps == 门槛，不超过（> 才拦）→ 不跳过
+        let p = DecisionParams {
+            max_quality_spread_bps: Some(100),
+            ..DecisionParams::default()
+        };
+        let b = book(&[("100", "100")], &[("101", "100")]);
+        let (d, _) = evaluate(&b, &trades(&[false, true, false, true]), dec!(1), &p);
+        assert_ne!(d, Decision::WaitForBetter);
     }
 
     #[test]

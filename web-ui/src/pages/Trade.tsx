@@ -49,7 +49,7 @@ export default function Trade() {
   const [target, setTarget] = useState("16400");
   const [singleMin, setSingleMin] = useState("25");
   const [singleMax, setSingleMax] = useState("38");
-  const [strategy, setStrategy] = useState<"oto" | "oto_smart" | "simple_round">("oto_smart");
+  const [strategy, setStrategy] = useState<"oto" | "oto_smart" | "oto_smart_maker" | "simple_round">("oto_smart");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [jobPage, setJobPage] = useState(0); // 任务列表分页（每页 5 条）
@@ -239,12 +239,13 @@ export default function Trade() {
           <select
             value={strategy}
             onChange={(e) =>
-              setStrategy(e.target.value as "oto" | "oto_smart" | "simple_round")
+              setStrategy(e.target.value as "oto" | "oto_smart" | "oto_smart_maker" | "simple_round")
             }
             title="刷量方式"
             className="bg-neutral-950 border border-neutral-800 rounded px-3 py-2 text-sm outline-none focus:border-neutral-600 cursor-pointer"
           >
             <option value="oto_smart">oto_smart (v2 决策矩阵, 默认)</option>
+            <option value="oto_smart_maker">oto_smart_maker (挂单省磨损 · NEX等窄深盘口)</option>
             <option value="oto">OTO (v1 快)</option>
             <option value="simple_round">simple_round (稳, 慢)</option>
           </select>
@@ -268,6 +269,13 @@ export default function Trade() {
               <br />
               oto_smart v2：决策矩阵（fast / small_spread_follow / taker_maker_hybrid …），
               maker 优先；实测 wear -4 ~ -7 bps，比 v1 OTO 略好。
+            </>
+          ) : strategy === "oto_smart_maker" ? (
+            <>
+              <br />
+              oto_smart_maker：卖腿改「挂在买入价排队赚点差」(而非吃单砸盘付点差) + 等 45s。
+              专治 NEX 这种「窄+深」盘口 —— 实测 NEX 磨损 <b>-3.5bps → +3.9bps（倒赚）</b>。
+              代价：慢约 5 倍，适合有时间刷量。
             </>
           ) : (
             <>
@@ -393,7 +401,7 @@ export default function Trade() {
                     </button>
                     <button
                       onClick={() => handleAction("resume")}
-                      disabled={stats.state !== "paused" && stats.state !== "pending"}
+                      disabled={!["paused", "pending", "stopped"].includes(stats.state)}
                       className="px-3 py-1.5 text-sm bg-emerald-700/40 hover:bg-emerald-700/60 disabled:opacity-30 text-emerald-300 rounded font-medium"
                     >
                       ▶ 启动/继续
@@ -545,6 +553,29 @@ function FaceVerifyPanel({
     };
   }, [username]);
 
+  useEffect(() => {
+    if (session?.status !== "waiting_scan" && session?.status !== "running") return;
+    let alive = true;
+    const hadImage = session?.screenshot_available;
+    let lastRefresh = session?.last_qr_refresh ?? null;
+    const timer = window.setInterval(() => {
+      void getFaceStatus(username).then((s) => {
+        if (!alive) return;
+        setSession(s);
+        // 首次出图,或后端每 ~60s 刷新了二维码(last_qr_refresh 变化)→ 破缓存重拉图
+        const refreshed = (s.last_qr_refresh ?? null) !== lastRefresh;
+        if (s.screenshot_available && (!hadImage || refreshed)) {
+          setImgNonce((n) => n + 1);
+        }
+        lastRefresh = s.last_qr_refresh ?? null;
+      });
+    }, 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [username, session?.status, session?.screenshot_available]);
+
   const handleTrigger = async () => {
     setSubmitting(true);
     setErr(null);
@@ -567,6 +598,9 @@ function FaceVerifyPanel({
     no_dialog: "bg-blue-500/20 text-blue-300",
     dialog_no_phone: "bg-orange-500/20 text-orange-300",
     captured: "bg-emerald-500/20 text-emerald-300",
+    waiting_scan: "bg-yellow-500/20 text-yellow-300",
+    verified: "bg-emerald-500/20 text-emerald-300",
+    expired: "bg-orange-500/20 text-orange-300",
     failed: "bg-red-500/20 text-red-300",
   };
   const sc = session
@@ -616,12 +650,26 @@ function FaceVerifyPanel({
         <div className="text-xs text-neutral-500 mb-3">→ {session.message}</div>
       )}
 
+      {session?.biz_no && (
+        <div className="text-xs text-neutral-500 mb-3">
+          bizNo: <span className="font-mono text-neutral-300">{session.biz_no}</span>
+        </div>
+      )}
+
       {session?.screenshot_available ? (
         <div className="border border-neutral-800 rounded p-2 bg-neutral-950">
           <div className="text-xs text-neutral-500 mb-2">
-            用手机币安 App 扫这个二维码完成验证，完成后回到任务列表点
-            <span className="text-emerald-400 mx-1">「启动 / 继续」</span>
-            续刷
+            {session.status === "verified" ? (
+              <>
+                币安已确认验证完成，可以回到任务列表点
+                <span className="text-emerald-400 mx-1">「启动 / 继续」</span>
+                续刷
+              </>
+            ) : session.status === "expired" ? (
+              "等待扫码超时；需要时重新触发一张新的二维码"
+            ) : (
+              "用手机币安 App 扫这个二维码，等待状态变为 verified 后再继续"
+            )}
           </div>
           <img
             src={`${faceQrUrl(username)}&n=${imgNonce}`}
@@ -638,8 +686,8 @@ function FaceVerifyPanel({
       )}
 
       <div className="text-xs text-neutral-700 mt-3">
-        实现：Playwright 用账号 user_data_dir 打开 alpha 页面 → page.evaluate 调 oto
-        /place 下一笔小单 → 触发风控 → 检测 「安全验证」弹窗 → 点击「手机验证」→ 截 dialog。
+        实现：Playwright 用账号 user_data_dir 打开 alpha 页面 → DOM 点买入小单 →
+        触发风控 → 截验证二维码 → 保活并轮询 bizNo 状态。
       </div>
     </div>
   );

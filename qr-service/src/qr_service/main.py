@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
     face_qr_dir = _resolve_path("FACE_QR_DIR", "../data/face_qr")
     pw_state_dir = _resolve_path("PLAYWRIGHT_STATE_DIR", "../data/playwright-state")
     headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes")
+    face_keepalive_s = int(os.environ.get("FACE_VERIFY_KEEPALIVE_S", "300"))
+    face_qr_refresh_s = int(os.environ.get("FACE_QR_REFRESH_INTERVAL_S", "62"))
 
     storage = Storage(db_path)
     if not await storage.has_schema():
@@ -54,6 +56,9 @@ async def lifespan(app: FastAPI):
         playwright_state_dir=pw_state_dir,
         face_qr_dir=face_qr_dir,
         headless=headless,
+        post_capture_keepalive_s=face_keepalive_s,
+        qr_refresh_interval_s=face_qr_refresh_s,
+        storage=storage,
     )
     refresh_interval = float(os.environ.get("REFRESH_INTERVAL_S", "3600"))
     refresher = TokenRefresher(storage=storage, interval_s=refresh_interval)
@@ -65,11 +70,14 @@ async def lifespan(app: FastAPI):
 
     refresher.start()
     logger.info(
-        "qr-service ready (db=%s, qr=%s, face_qr=%s, headless=%s, refresh=%.0fs)",
+        "qr-service ready (db=%s, qr=%s, face_qr=%s, headless=%s, face_keepalive=%ss, "
+        "face_qr_refresh=%ss, refresh=%.0fs)",
         db_path,
         qr_dir,
         face_qr_dir,
         headless,
+        face_keepalive_s,
+        face_qr_refresh_s,
         refresh_interval,
     )
     try:

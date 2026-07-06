@@ -8,6 +8,9 @@ export type FaceStatus =
   | "no_dialog"
   | "dialog_no_phone"
   | "captured"
+  | "waiting_scan"
+  | "verified"
+  | "expired"
   | "failed";
 
 export interface FaceSession {
@@ -15,8 +18,12 @@ export interface FaceSession {
   status: FaceStatus;
   message: string;
   screenshot_available: boolean;
+  biz_no?: string | null;
   started_at?: number;
   finished_at?: number | null;
+  verified_at?: number | null;
+  expires_at?: number | null;
+  last_qr_refresh?: number | null;
 }
 
 async function jsonOrThrow<T>(resp: Response): Promise<T> {

@@ -248,7 +248,7 @@ async fn run_job(state: AppState, job_id: String) {
 
         // 跑一轮（按 strategy 走不同实现）
         let round_result = match job.strategy.as_str() {
-            "oto_smart" => {
+            "oto_smart" | "oto_smart_maker" => {
                 run_oto_smart_round(
                     &state, &auth, &job_id, &symbol, &base_asset, this_single, tick, step, round,
                 )
@@ -288,7 +288,7 @@ async fn run_job(state: AppState, job_id: String) {
         // V2.7 风控：只对 oto_smart 启用（其他 strategy 不查 rounds 表）。
         // 命中阈值 → set_state=paused，循环下一轮顶上的 state 检查会让 final_cleanup
         // 跑完并退出，job 留在 paused，用户次日 resume 续刷。
-        if job.strategy == "oto_smart" && check_risk_and_pause(&state, &job, &job_id, round, &auth, &mut wear_consec_hits).await {
+        if matches!(job.strategy.as_str(), "oto_smart" | "oto_smart_maker") && check_risk_and_pause(&state, &job, &job_id, round, &auth, &mut wear_consec_hits).await {
             // 不直接 return — 让 loop 顶部的 state 检查走 final_cleanup 路径，
             // 保证清仓动作走到。
             continue;
@@ -1383,11 +1383,40 @@ async fn run_oto_smart_round(
         .into_iter()
         .filter(|t| t.symbol == symbol)
         .collect();
-    let params = DecisionParams::default();
+    let mut params = DecisionParams::default();
+    // V2.tune40：每-job 可选点差门槛(bps)。原有 job 无此参数 → None → 行为完全不变。
+    // V2.tune41：每-job 可选「fast 卖腿改 maker」实验（NEX 磨损专项）：
+    //   _fast_sell_maker=true → Fast 的卖腿挂在买入价(best_ask)排队赚回点差，而非砸 bid 付点差
+    //   _pending_wait_s=N     → 卖腿(maker)等待秒数（默认 MAKER_TIMEOUT_S=3s 在深队列排不到，
+    //                            当年 tune2 maker 惨败疑因等待过短；拉长给排队时间）
+    // V2.tune41：策略 oto_smart_maker = fast 卖腿改挂单(best_ask)赚点差 + 等 45s。
+    // 专治「窄+深」盘口(如 NEX)的吃单磨损:实测 NEX -3.5bps → +3.9bps。慢约5倍,适合有时间刷量。
+    // 任何币选了这策略都生效(不硬编码 symbol);参数 _fast_sell_maker/_pending_wait_s 仍可覆盖。
+    let mut fast_sell_maker = false;
+    let mut pending_wait_override: Option<u64> = None;
+    if let Ok(Some(j)) = jobs::get(&state.db, job_id).await {
+        if j.strategy == "oto_smart_maker" {
+            fast_sell_maker = true;
+            pending_wait_override = Some(45);
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&j.params_json) {
+            if let Some(bps) = v.get("_quality_spread_bps").and_then(|x| x.as_u64()) {
+                params.max_quality_spread_bps = Some(bps as u32);
+            }
+            if let Some(b) = v.get("_fast_sell_maker").and_then(|x| x.as_bool()) {
+                fast_sell_maker = b;
+            }
+            if let Some(w) = v.get("_pending_wait_s").and_then(|x| x.as_u64()) {
+                pending_wait_override = Some(w.clamp(3, 120));
+            }
+        }
+    }
     let (decision_kind, ctx) = decision::evaluate(&book, &recent, tick, &params);
     info!(
         %job_id, round_no, decision = %decision_kind.label(),
-        spread_ticks = ctx.spread_ticks, imbalance = ctx.imbalance, trend = ctx.trend,
+        spread_ticks = ctx.spread_ticks, spread_bps = ctx.spread_bps,
+        best_bid = %ctx.best_bid, best_ask = %ctx.best_ask,
+        imbalance = ctx.imbalance, trend = ctx.trend,
         "v2 decision"
     );
 
@@ -1412,7 +1441,7 @@ async fn run_oto_smart_round(
         return Ok(());
     }
 
-    let (working_price, working_is_maker, pending_price, pending_is_maker) = match decision_kind {
+    let (working_price, working_is_maker, mut pending_price, mut pending_is_maker) = match decision_kind {
         Decision::DoubleMaker => (
             ctx.best_bid + tick,
             true,
@@ -1441,6 +1470,19 @@ async fn run_oto_smart_round(
             false,
         ),
     };
+
+    // V2.tune41：Fast + _fast_sell_maker → 卖腿改挂 best_ask(≈买入成交价)排队。
+    // 卖成 = 这轮点差成本≈0（买 ask 卖 ask）；配合 _pending_wait_s 长等待给排队时间。
+    // 排不到 → 原有 cancel + emergency_sell 兜底，持仓不失控。
+    if fast_sell_maker && matches!(decision_kind, Decision::Fast) {
+        pending_price = ctx.best_ask;
+        pending_is_maker = true;
+        info!(
+            %job_id, round_no, pending_price = %pending_price,
+            wait_s = pending_wait_override.unwrap_or(MAKER_TIMEOUT_S),
+            "v2.tune41 fast sell→maker@ask (experiment)"
+        );
+    }
 
     if pending_price <= Decimal::ZERO || working_price <= Decimal::ZERO {
         anyhow::bail!("bad prices: working={working_price} pending={pending_price}");
@@ -1585,7 +1627,8 @@ async fn run_oto_smart_round(
     let _ = persistence::repo::orders::set_status(&state.db, &working_oid, "filled").await;
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let pending_timeout = if pending_is_maker { MAKER_TIMEOUT_S } else { FILL_WAIT_TIMEOUT_S };
+    let pending_timeout = pending_wait_override
+        .unwrap_or(if pending_is_maker { MAKER_TIMEOUT_S } else { FILL_WAIT_TIMEOUT_S });
     let fills_pending = wait_fills_with_timeout(state, auth, &pending_oid, symbol, pending_timeout).await;
     persist_fills(state, &fills_pending, Some(job_id), &auth.username).await;
 

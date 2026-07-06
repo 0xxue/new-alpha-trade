@@ -34,7 +34,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from playwright.async_api import BrowserContext, Page, async_playwright, Playwright
+from playwright.async_api import BrowserContext, Page, Request, async_playwright, Playwright
+
+from qr_service.storage import Storage
 
 logger = logging.getLogger("qr_service.face_verify")
 
@@ -98,6 +100,27 @@ PHONE_VERIFY_BUTTON_SELECTORS = [
     'div:has-text("手机验证"):has(svg)',
 ]
 
+# 二维码 60s 过期后,弹窗显示「Verification failed」+ 黄色主按钮「重新验证」(不是「刷新二维码」)。
+# 点它重新生成一张新码。实测 DOM(2026-07,在 #mfa-shadow-host 的 shadow-root 内)。
+REFRESH_QR_BUTTON_SELECTORS = [
+    'button.bn-button__primary:has-text("重新验证")',
+    'button:has-text("重新验证")',
+    "text=重新验证",
+    'button:has-text("Verify Again")',
+    'button:has-text("Try Again")',
+    'button:has-text("Retry")',
+    # 老版本兜底
+    "text=刷新二维码",
+]
+
+# 币安 alpha 下单私有接口(下单会触发会话令牌轮换 → 抓这些请求的最新 headers 回写 DB)
+BAPI_ORDER_PATHS = (
+    "/bapi/asset/v1/private/alpha-trade/order/place",
+    "/bapi/asset/v1/private/alpha-trade/oto-order/place",
+)
+# 长期会话 cookie(与 playwright_login 同款 sanity 校验,防止把残缺 cookie 写脏 DB)
+LONG_TERM_COOKIE_KEYS = ("cr00", "p20t", "r20t", "f30l", "d1og")
+
 DIALOG_SELECTORS = [
     "div#mfa-shadow-host",   # 币安 MFA/安全验证 弹窗容器(老项目 _place_web_order L2183)
     "div.bn-modal-wrap",
@@ -122,6 +145,9 @@ FaceStatus = Literal[
     "no_dialog",       # 下单后没弹安全验证弹窗，账号目前不需要风控
     "dialog_no_phone", # 弹窗里没找到 "手机验证" 按钮
     "captured",        # 截图成功
+    "waiting_scan",    # 截图成功，浏览器保活中，等待 App 扫码完成
+    "verified",        # getSteps 显示 DONE
+    "expired",         # 等待扫码超时
     "failed",
 ]
 
@@ -132,8 +158,12 @@ class FaceVerifySession:
     status: FaceStatus = "idle"
     message: str = ""
     screenshot_path: Path | None = None
+    biz_no: str | None = None
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    verified_at: float | None = None
+    expires_at: float | None = None
+    last_qr_refresh: float | None = None
 
 
 class FaceVerifyManager:
@@ -145,16 +175,27 @@ class FaceVerifyManager:
         face_qr_dir: Path,
         headless: bool = True,
         per_account_timeout_s: int = 90,
+        post_capture_keepalive_s: int = 180,
+        qr_refresh_interval_s: int = 62,
+        storage: Storage | None = None,
     ) -> None:
         self.playwright_state_dir = playwright_state_dir
         self.face_qr_dir = face_qr_dir
         self.headless = headless
         self.timeout_s = per_account_timeout_s
+        self.post_capture_keepalive_s = post_capture_keepalive_s
+        # 二维码 60s 过期,>60s 点「刷新二维码」按钮 + 重截图(老 daemon 62s 同款)
+        self.qr_refresh_interval_s = qr_refresh_interval_s
+        self.storage = storage
         self.face_qr_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, FaceVerifySession] = {}
+        # 每账号最近一次 bapi 下单请求的 headers(含 csrftoken 等),用于把轮换后的会话回写 DB
+        self._captured_headers: dict[str, dict[str, str]] = {}
         self._playwright: Playwright | None = None
         self._pw_lock = asyncio.Lock()
         self._user_locks: dict[str, asyncio.Lock] = {}
+        self._held_contexts: dict[str, BrowserContext] = {}
+        self._hold_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def _ensure_playwright(self) -> Playwright:
         async with self._pw_lock:
@@ -163,6 +204,17 @@ class FaceVerifyManager:
             return self._playwright
 
     async def shutdown(self) -> None:
+        for task in list(self._hold_tasks.values()):
+            task.cancel()
+        if self._hold_tasks:
+            await asyncio.gather(*self._hold_tasks.values(), return_exceptions=True)
+        self._hold_tasks.clear()
+        for ctx in list(self._held_contexts.values()):
+            try:
+                await ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._held_contexts.clear()
         if self._playwright is not None:
             await self._playwright.stop()
             self._playwright = None
@@ -177,6 +229,7 @@ class FaceVerifyManager:
         """触发一次人脸验证截图。同账户串行执行（避免 user_data_dir 冲突）。"""
         lock = self._user_locks.setdefault(username, asyncio.Lock())
         async with lock:
+            await self._close_held_context(username)
             sess = FaceVerifySession(username=username, status="running",
                                       message=f"triggering for {symbol} amount={amount_usdt}")
             self.sessions[username] = sess
@@ -192,7 +245,8 @@ class FaceVerifyManager:
                 sess.status = "failed"
                 sess.message = f"{type(e).__name__}: {e}"
                 logger.exception("[%s] face_verify failed", username)
-            sess.finished_at = time.time()
+            if sess.status != "waiting_scan":
+                sess.finished_at = time.time()
             return sess
 
     async def _resolve_token(self, symbol: str) -> dict | None:
@@ -233,6 +287,7 @@ class FaceVerifyManager:
     ) -> None:
         pw = await self._ensure_playwright()
         user_data_dir = self.playwright_state_dir / sess.username
+        keep_context = False
 
         if not user_data_dir.exists():
             sess.status = "failed"
@@ -260,6 +315,8 @@ class FaceVerifyManager:
         try:
             page = await context.new_page()
             await page.add_init_script(INIT_SCRIPT)
+            self._install_biz_no_listener(page, sess)
+            self._install_header_listener(page, sess.username)
 
             logger.info("[%s] opening %s", sess.username, target_url)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
@@ -342,31 +399,335 @@ class FaceVerifyManager:
 
             # 截图 dialog（含二维码）
             out_path = self.screenshot_path_for(sess.username)
-            captured = False
-            for selector in DIALOG_SELECTORS:
-                try:
-                    dlg = page.locator(selector).first
-                    if await dlg.is_visible(timeout=2000):
-                        await dlg.screenshot(path=str(out_path))
-                        captured = True
-                        logger.info("[%s] dialog screenshot saved: %s", sess.username, out_path)
-                        break
-                except Exception:  # noqa: BLE001
-                    continue
-
-            if not captured:
-                # 选择器都没匹配 → full page 兜底
-                await page.screenshot(path=str(out_path), full_page=True)
+            captured = await self._screenshot_dialog(page, out_path)
+            if captured:
+                logger.info("[%s] dialog screenshot saved: %s", sess.username, out_path)
+            else:
                 logger.info("[%s] full-page fallback screenshot saved: %s", sess.username, out_path)
 
             sess.screenshot_path = out_path
-            sess.status = "captured"
-            sess.message = "QR captured — scan with Binance app to complete"
+            sess.last_qr_refresh = time.time()
+            # 下单已触发会话令牌轮换 → 立刻把浏览器最新 cookies 回写 DB,别让引擎的 DB 会话被孤立
+            await self._sync_cookies_to_db(context, sess.username)
+            if self.post_capture_keepalive_s > 0:
+                keep_context = True
+                sess.status = "waiting_scan"
+                sess.expires_at = time.time() + self.post_capture_keepalive_s
+                suffix = f" (bizNo={sess.biz_no})" if sess.biz_no else ""
+                sess.message = (
+                    "QR captured — scan with Binance app; waiting for Binance challenge DONE"
+                    f"{suffix}"
+                )
+                self._hold_context_after_capture(sess.username, context, page, sess)
+            else:
+                sess.status = "captured"
+                suffix = f" (bizNo={sess.biz_no})" if sess.biz_no else ""
+                sess.message = f"QR captured — scan with Binance app to complete{suffix}"
         finally:
+            if not keep_context:
+                try:
+                    await context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _install_biz_no_listener(self, page: Page, sess: FaceVerifySession) -> None:
+        """Capture the challenge bizNo emitted by Binance's own web order request."""
+
+        def handle_response(response) -> None:  # noqa: ANN001
             try:
-                await context.close()
+                url = response.url
+                if (
+                    "/bapi/asset/v1/private/alpha-trade/order/place" not in url
+                    and "/bapi/asset/v1/private/alpha-trade/oto-order/place" not in url
+                ):
+                    return
+                headers = response.headers
+                biz_no = headers.get("risk_challenge_biz_no") or headers.get(
+                    "risk-challenge-biz-no"
+                )
+                if biz_no:
+                    sess.biz_no = biz_no
+                    logger.info("[%s] captured risk_challenge_biz_no=%s", sess.username, biz_no)
+                else:
+                    logger.info("[%s] web order response has no risk_challenge_biz_no", sess.username)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[%s] capture bizNo failed: %s", sess.username, e)
+
+        page.on("response", handle_response)
+
+    def _install_header_listener(self, page: Page, username: str) -> None:
+        """抓 bapi 下单请求的最新 headers(含 cookie/csrftoken 等),供回写 DB 用。
+        每次覆盖 → 拿到令牌轮换后最新最完整的一份(仿 playwright_login._on_request)。"""
+
+        async def handle_request(req: Request) -> None:
+            try:
+                if not any(p in req.url for p in BAPI_ORDER_PATHS):
+                    return
+                headers = await req.all_headers()
+                if len(headers.get("cookie", "")) > 100:
+                    self._captured_headers[username] = headers
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[%s] capture headers failed: %s", username, e)
+
+        page.on("request", handle_request)
+
+    async def _screenshot_dialog(self, page: Page, out_path: Path) -> bool:
+        """截安全验证弹窗(含二维码);选择器都不中 → full-page 兜底。返回是否命中弹窗。"""
+        for selector in DIALOG_SELECTORS:
+            try:
+                dlg = page.locator(selector).first
+                if await dlg.is_visible(timeout=2000):
+                    await dlg.screenshot(path=str(out_path))
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            await page.screenshot(path=str(out_path), full_page=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    async def _security_dialog_present(self, page: Page) -> bool:
+        """「安全验证」弹窗是否还在。消失 = 挑战完成、单已放行 → 可停止刷新。"""
+        for selector in SECURITY_DIALOG_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if await el.is_visible(timeout=800):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    async def _refresh_qr(self, page: Page, sess: FaceVerifySession, out_path: Path) -> bool:
+        """二维码过期后弹窗出现「重新验证」按钮 → 点它重新生成新码 + 重截图。
+        码还有效时按钮不存在 → 直接返回 False(不动)。每轮 keepalive 调用一次(3s)。"""
+        btn = None
+        for selector in REFRESH_QR_BUTTON_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if await el.count() and await el.is_visible(timeout=800):
+                    btn = el
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if btn is None:
+            return False  # 码还有效 / 弹窗已关,无需刷新
+        try:
+            await btn.click(timeout=1500)
+        except Exception:  # noqa: BLE001
+            return False
+        await page.wait_for_timeout(1500)
+        # 重新验证后可能回到「安全验证」方式选择页 → 补点一次「手机验证」把新码调出来
+        for selector in PHONE_VERIFY_BUTTON_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if await el.count() and await el.is_visible(timeout=800):
+                    await el.click(timeout=1500)
+                    await page.wait_for_timeout(1000)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        await page.wait_for_timeout(2000)  # 等新码渲染
+        await self._screenshot_dialog(page, out_path)
+        sess.last_qr_refresh = time.time()
+        logger.info("[%s] QR re-verified(点重新验证)+ re-screenshot", sess.username)
+        return True
+
+    async def _dump_refresh_debug(self, page: Page, username: str) -> None:
+        """刷新按钮没找到时,dump 弹窗真实 DOM(含 shadow root)+ 存调试全屏图,便于定位真实按钮。"""
+        try:
+            dbg = self.screenshot_path_for(username).parent / f"{username}_dbg.png"
+            await page.screenshot(path=str(dbg), full_page=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            info = await page.evaluate(
+                r"""
+                () => {
+                  const scan = (root, label) => {
+                    const hits = [];
+                    root.querySelectorAll('div,button,span,a,[role="button"],svg').forEach(e => {
+                      const t = (e.textContent || '').trim();
+                      if (t && t.length <= 24 && /刷新|refresh|失效|expired|重新|过期|Refresh|重试/i.test(t)) {
+                        const cls = (e.className && e.className.baseVal !== undefined) ? e.className.baseVal : (e.className || '');
+                        hits.push({tag: e.tagName, cls: String(cls).slice(0, 60), text: t});
+                      }
+                    });
+                    return {label, text: (root.textContent || '').replace(/\s+/g, ' ').slice(0, 300), hits};
+                  };
+                  const out = {url: location.href, roots: []};
+                  const sh = document.querySelector('#mfa-shadow-host');
+                  if (sh && sh.shadowRoot) out.roots.push(scan(sh.shadowRoot, 'mfa-shadow-root'));
+                  document.querySelectorAll('div[role="dialog"],div.bn-modal,div.modal').forEach((d, i) => out.roots.push(scan(d, 'dialog' + i)));
+                  return out;
+                }
+                """
+            )
+            logger.info("[%s] refresh-debug: %s", username, json.dumps(info, ensure_ascii=False)[:1400])
+        except Exception as e:  # noqa: BLE001
+            logger.info("[%s] refresh-debug dump failed: %s", username, e)
+
+    async def _sync_cookies_to_db(self, context: BrowserContext, username: str) -> bool:
+        """把浏览器 context 当前 cookies + 最近 bapi headers 回写 DB。
+        原因:人脸助手在浏览器下单会触发币安令牌轮换,引擎读的是 DB 静态 cookies —— 不回写
+        引擎会话就被孤立(`100002001 登录状态已失效`)。回写后引擎下一轮自动续,无需重登。"""
+        if self.storage is None:
+            return False
+        try:
+            cookies_list = await context.cookies()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] sync cookies: read context.cookies failed: %s", username, e)
+            return False
+        cookies = {c["name"]: c["value"] for c in cookies_list}
+        # sanity:必须有足够的长期会话 cookie,否则别拿残缺的去覆盖引擎正在用的那份
+        got_long = [k for k in LONG_TERM_COOKIE_KEYS if len(cookies.get(k, "")) >= 16]
+        if len(got_long) < 3:
+            logger.warning(
+                "[%s] sync cookies skipped: long-term cookies incomplete (got %s)", username, got_long
+            )
+            return False
+        headers = self._captured_headers.get(username) or {}
+        clean_headers = {
+            k: v
+            for k, v in headers.items()
+            if not k.startswith(":") and k.lower() not in ("content-length",)
+        }
+        try:
+            await self.storage.upsert_account(
+                username=username, cookies=cookies, headers=clean_headers
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] sync cookies: upsert_account failed: %s", username, e)
+            return False
+        logger.info(
+            "[%s] synced rotated session → DB (%d cookies, %d headers, long=%s)",
+            username, len(cookies), len(clean_headers), got_long,
+        )
+        return True
+
+    async def _close_held_context(self, username: str) -> None:
+        task = self._hold_tasks.pop(username, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return
+        ctx = self._held_contexts.pop(username, None)
+        if ctx is not None:
+            try:
+                await ctx.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _hold_context_after_capture(
+        self,
+        username: str,
+        context: BrowserContext,
+        page: Page,
+        sess: FaceVerifySession,
+    ) -> None:
+        self._held_contexts[username] = context
+        old_task = self._hold_tasks.pop(username, None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+        self._hold_tasks[username] = asyncio.create_task(
+            self._keep_alive_until_verified(username, context, page, sess)
+        )
+
+    async def _keep_alive_until_verified(
+        self,
+        username: str,
+        context: BrowserContext,
+        page: Page,
+        sess: FaceVerifySession,
+    ) -> None:
+        deadline = time.time() + self.post_capture_keepalive_s
+        out_path = self.screenshot_path_for(username)
+        last_refresh = time.time()  # 距上次出码时间;满 55s(码~60s过期)才允许点刷新
+        try:
+            while time.time() < deadline:
+                # 1) 完成检测:只认 getSteps=DONE(csrftoken 修好后可靠)。
+                #    不再用"弹窗消失"兜底 —— 弹窗切换瞬间会误判,会在用户扫完前提前关会话。
+                done = False
+                if sess.biz_no:
+                    csrf = (self._captured_headers.get(username) or {}).get("csrftoken")
+                    status = await self._get_challenge_step_status(page, sess.biz_no, csrf)
+                    if status:
+                        logger.info("[%s] getSteps status=%s", username, status)
+                        sess.message = f"QR captured — waiting (bizNo={sess.biz_no}, status={status})"
+                    if status in ("DONE", "PASS", "SUCCESS"):
+                        done = True
+                if done:
+                    sess.status = "verified"
+                    sess.verified_at = time.time()
+                    sess.finished_at = sess.verified_at
+                    sess.message = f"verification completed (bizNo={sess.biz_no})"
+                    logger.info("[%s] face verification DONE bizNo=%s", username, sess.biz_no)
+                    await self._sync_cookies_to_db(context, username)
+                    return
+                # 2) 只有距上次出码 >=55s(即码已过期)才点「重新验证」刷新 —— 避免在用户扫码/处理中拆台
+                if time.time() - last_refresh >= 55:
+                    if await self._refresh_qr(page, sess, out_path):
+                        await self._sync_cookies_to_db(context, username)
+                        last_refresh = time.time()
+                await asyncio.sleep(3)
+
+            if sess.status == "waiting_scan":
+                sess.status = "expired"
+                sess.finished_at = time.time()
+                suffix = f" (bizNo={sess.biz_no})" if sess.biz_no else ""
+                sess.message = f"QR wait timeout; trigger a fresh QR if needed{suffix}"
+                logger.warning("[%s] face verification wait expired%s", username, suffix)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] face verification keepalive failed: %s", username, e)
+        finally:
+            self._hold_tasks.pop(username, None)
+            held = self._held_contexts.pop(username, None)
+            if held is context:
+                try:
+                    await context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            elif held is not None:
+                self._held_contexts[username] = held
+
+    async def _get_challenge_step_status(
+        self, page: Page, biz_no: str, csrf: str | None = None
+    ) -> str | None:
+        try:
+            result = await page.evaluate(
+                """
+                async ([bizNo, csrf]) => {
+                    const h = { "mfa-flag": "1", "clienttype": "web" };
+                    if (csrf) h["csrftoken"] = csrf;
+                    const url = `/bapi/accounts/v1/protect/risk/challenge/getSteps?bizNo=${encodeURIComponent(bizNo)}`;
+                    const resp = await fetch(url, { credentials: "include", headers: h });
+                    const text = await resp.text();
+                    let body = null;
+                    try { body = JSON.parse(text); } catch (_) {}
+                    return { status: resp.status, body, text };
+                }
+                """,
+                [biz_no, csrf],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("getSteps poll failed bizNo=%s: %s", biz_no, e)
+            return None
+
+        if not isinstance(result, dict):
+            return None
+        body = result.get("body")
+        if isinstance(body, dict):
+            data = body.get("data")
+            if isinstance(data, dict):
+                status = data.get("status")
+                if status:
+                    return str(status)
+            code = body.get("code")
+            if code:
+                return f"code={code}"
+        return None
 
     async def _dismiss_cookie(self, page: Page) -> None:
         """关 Cookie 同意弹窗(老项目 _navigate_to_token_page 同款)。"""

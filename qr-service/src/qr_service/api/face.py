@@ -18,6 +18,37 @@ logger = logging.getLogger("qr_service.api.face")
 router = APIRouter()
 
 
+def _session_json(sess) -> dict:  # noqa: ANN001
+    return {
+        "username": sess.username,
+        "status": sess.status,
+        "message": sess.message,
+        "screenshot_available": sess.screenshot_path is not None
+        and sess.screenshot_path.exists(),
+        "biz_no": sess.biz_no,
+        "started_at": sess.started_at,
+        "finished_at": sess.finished_at,
+        "verified_at": sess.verified_at,
+        "expires_at": sess.expires_at,
+        "last_qr_refresh": sess.last_qr_refresh,
+    }
+
+
+def _idle_session_json(username: str) -> dict:
+    return {
+        "username": username,
+        "status": "idle",
+        "message": "never triggered",
+        "screenshot_available": False,
+        "biz_no": None,
+        "started_at": None,
+        "finished_at": None,
+        "verified_at": None,
+        "expires_at": None,
+        "last_qr_refresh": None,
+    }
+
+
 class TriggerReq(BaseModel):
     symbol: str = Field(..., description="Alpha id (e.g. ALPHA_971) 或 base symbol (e.g. NEX)")
     amount_usdt: float = Field(10.0, ge=0.5, le=100.0, description="触发金额，默认 10 USDT")
@@ -27,17 +58,7 @@ class TriggerReq(BaseModel):
 async def trigger_face(username: str, body: TriggerReq, request: Request) -> JSONResponse:
     mgr = request.app.state.face_mgr
     sess = await mgr.trigger(username=username, symbol=body.symbol, amount_usdt=body.amount_usdt)
-    return JSONResponse(
-        {
-            "username": sess.username,
-            "status": sess.status,
-            "message": sess.message,
-            "screenshot_available": sess.screenshot_path is not None
-            and sess.screenshot_path.exists(),
-            "started_at": sess.started_at,
-            "finished_at": sess.finished_at,
-        }
-    )
+    return JSONResponse(_session_json(sess))
 
 
 @router.get("/{username}/status")
@@ -45,20 +66,8 @@ async def face_status(username: str, request: Request) -> JSONResponse:
     mgr = request.app.state.face_mgr
     sess = mgr.get_session(username)
     if sess is None:
-        return JSONResponse(
-            {"username": username, "status": "idle", "message": "never triggered"}
-        )
-    return JSONResponse(
-        {
-            "username": sess.username,
-            "status": sess.status,
-            "message": sess.message,
-            "screenshot_available": sess.screenshot_path is not None
-            and sess.screenshot_path.exists(),
-            "started_at": sess.started_at,
-            "finished_at": sess.finished_at,
-        }
-    )
+        return JSONResponse(_idle_session_json(username))
+    return JSONResponse(_session_json(sess))
 
 
 @router.get("/{username}/qr")
