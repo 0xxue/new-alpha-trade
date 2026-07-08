@@ -70,14 +70,22 @@ export default function Trade() {
   const symbolMatches = useMemo(() => {
     const q = symbolQuery.trim().toUpperCase();
     if (!q) return [];
+    // 按相关度打分：符号精确 > 符号前缀 > 符号子串 > 名字/id 子串。
+    // 否则单字母查询（如 "O"）会被"名字里含该字母"的几百个币淹没。
+    const score = (t: (typeof tokens)[number]): number => {
+      const sym = t.symbol.toUpperCase();
+      if (sym === q) return 0;
+      if (sym.startsWith(q)) return 1;
+      if (sym.includes(q)) return 2;
+      if (t.name.toUpperCase().includes(q) || t.alpha_id.includes(q)) return 3;
+      return 99;
+    };
     return tokens
-      .filter(
-        (t) =>
-          t.symbol.toUpperCase().includes(q) ||
-          t.name.toUpperCase().includes(q) ||
-          t.alpha_id.includes(q)
-      )
-      .slice(0, 8);
+      .map((t) => ({ t, s: score(t) }))
+      .filter((x) => x.s < 99)
+      .sort((a, b) => a.s - b.s || a.t.symbol.localeCompare(b.t.symbol))
+      .slice(0, 8)
+      .map((x) => x.t);
   }, [symbolQuery, tokens]);
 
   useEffect(() => {
