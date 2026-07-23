@@ -92,11 +92,19 @@ impl AlphaWsClient {
     /// 启动后台连接 + 重连任务。返回 broadcast Receiver。
     /// 只能调用一次；二次调用 cmd_rx 已被 take，subscribe 命令收不到。
     pub fn spawn(self: &Arc<Self>) -> broadcast::Receiver<StreamEvent> {
+        let _ = self.spawn_task();
+        self.tx.subscribe()
+    }
+
+    /// 同 `spawn`，但返回后台任务的 `JoinHandle`，供调用方在不再需要该连接时
+    /// `abort()`。`run()` 是无停止信号的 `loop{}`，若不 abort，每次为短命连接
+    /// （如 per-account user-stream 重连）新建的 client 都会残留一个孤儿 run() 任务，
+    /// 永远重连、永久占用一个 socket fd —— 这是 fd 泄漏的根因。
+    pub fn spawn_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             me.run().await;
-        });
-        self.tx.subscribe()
+        })
     }
 
     /// 添加订阅。既入"想订阅"集合（重连后会恢复），又给活动连接发 SUBSCRIBE 帧立即生效。

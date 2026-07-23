@@ -177,15 +177,19 @@ impl UserStreamManager {
         let listen_key = self.alpha_rest.create_listen_key(&auth).await?;
         info!(%username, key_prefix = &listen_key[..listen_key.len().min(12)], "got listen-key");
 
-        // 起 ws client 订阅 alpha@<listen_key>
+        // 起 ws client 订阅 alpha@<listen_key>。
+        // 注意：run_once 会被 run_loop 反复调用（重连），每次都新建一个 client。
+        // 必须在本函数返回时 abort 掉本轮起的 ws 连接任务 + 转发任务，否则孤儿 run()
+        // loop 会永远重连、永久占着一个 socket fd —— 历史上引擎 ~20 天打满
+        // LimitNOFILE=1024 的 fd 泄漏就出在这里。
         let ws = Arc::new(AlphaWsClient::with_url(USER_STREAM_WS.into()));
-        let _rx = ws.spawn();
+        let ws_task = ws.spawn_task();
         // 转发 ws -> public_ws broadcast（让 /ws/stream 同源收到）
         let public_tx_ws = self.public_ws.clone();
         let mut forward_rx = ws.subscribe_handle();
         let username_for_fwd = username.to_string();
         let db_for_fwd = self.db.clone();
-        tokio::spawn(async move {
+        let fwd_task = tokio::spawn(async move {
             while let Ok(evt) = forward_rx.recv().await {
                 debug!(user = %username_for_fwd, stream = %evt.stream, "user event");
                 // 先尝试解析 executionReport TRADE 写库（主推路径）
@@ -199,6 +203,17 @@ impl UserStreamManager {
                 });
             }
         });
+        // run_once 返回（Ok 或 Err，含被 run_loop/spawn_one abort 而 drop future）时，
+        // 自动 abort 上面两个后台任务，关闭本轮的 wss socket —— 根治 fd 泄漏。
+        struct AbortOnDrop(Vec<tokio::task::JoinHandle<()>>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                for h in &self.0 {
+                    h.abort();
+                }
+            }
+        }
+        let _abort_guard = AbortOnDrop(vec![ws_task, fwd_task]);
 
         ws.add_subscriptions(vec![format!("alpha@{listen_key}")]).await;
         info!(%username, "user stream subscribed");
