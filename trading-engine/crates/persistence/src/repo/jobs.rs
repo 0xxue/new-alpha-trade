@@ -37,6 +37,8 @@ pub struct JobRow {
     pub params_json: String,
     pub target_volume: String, // Decimal 字符串
     pub state: String,
+    /// 自动暂停原因（风控/人脸验证等）。NULL=手动暂停或未暂停。
+    pub pause_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -69,7 +71,7 @@ pub async fn insert(pool: &SqlitePool, j: &NewJob) -> sqlx::Result<()> {
 
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<JobRow>> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, username, symbol, strategy, params_json, target_volume, state, created_at, updated_at \
+        "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
          FROM jobs WHERE id = ?",
     )
     .bind(id)
@@ -80,7 +82,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<JobRow>> {
 pub async fn list(pool: &SqlitePool, state_filter: Option<JobState>) -> sqlx::Result<Vec<JobRow>> {
     if let Some(s) = state_filter {
         sqlx::query_as::<_, JobRow>(
-            "SELECT id, username, symbol, strategy, params_json, target_volume, state, created_at, updated_at \
+            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
              FROM jobs WHERE state = ? ORDER BY created_at DESC",
         )
         .bind(s.as_str())
@@ -88,7 +90,7 @@ pub async fn list(pool: &SqlitePool, state_filter: Option<JobState>) -> sqlx::Re
         .await
     } else {
         sqlx::query_as::<_, JobRow>(
-            "SELECT id, username, symbol, strategy, params_json, target_volume, state, created_at, updated_at \
+            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
              FROM jobs ORDER BY created_at DESC",
         )
         .fetch_all(pool)
@@ -97,10 +99,29 @@ pub async fn list(pool: &SqlitePool, state_filter: Option<JobState>) -> sqlx::Re
 }
 
 pub async fn set_state(pool: &SqlitePool, id: &str, state: JobState) -> sqlx::Result<bool> {
+    // 任何显式状态转移都清空 pause_reason：手动暂停无原因、resume/停止/完成自然清空。
+    // 引擎自动暂停(风控/人脸)走 set_paused_with_reason 单独写入原因。
     let r = sqlx::query(
-        "UPDATE jobs SET state = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE jobs SET state = ?, pause_reason = NULL, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(state.as_str())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// 自动暂停并记录原因（撞人脸/手机验证、磨损超阈值等）。
+/// 前端据此在任务上显示原因 + 引导用户完成验证，而不是只看到裸 "paused"。
+pub async fn set_paused_with_reason(
+    pool: &SqlitePool,
+    id: &str,
+    reason: &str,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE jobs SET state = 'paused', pause_reason = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(reason)
     .bind(id)
     .execute(pool)
     .await?;

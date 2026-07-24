@@ -473,6 +473,8 @@ async fn trade_stats(
                 "decision_counts": round_stats.decision_counts,
             }),
         );
+        // 透出暂停原因（风控/人脸自动暂停时非空），前端据此提示用户
+        obj.insert("pause_reason".into(), json!(job.pause_reason));
     }
     Ok(Json(v))
 }
@@ -515,6 +517,7 @@ fn job_to_json(j: jobs::JobRow) -> Value {
         "params": serde_json::from_str::<Value>(&j.params_json).unwrap_or(Value::Null),
         "target_volume": j.target_volume,
         "state": j.state,
+        "pause_reason": j.pause_reason,
         "created_at": j.created_at,
         "updated_at": j.updated_at,
     })

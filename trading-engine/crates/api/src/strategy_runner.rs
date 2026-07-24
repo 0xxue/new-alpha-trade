@@ -276,7 +276,7 @@ async fn run_job(state: AppState, job_id: String) {
                     %job_id, err = %e,
                     "RISK: face/phone verification required → auto pause (complete in Binance app, then resume)"
                 );
-                let _ = jobs::set_state(&state.db, &job_id, jobs::JobState::Paused).await;
+                let _ = jobs::set_paused_with_reason(&state.db, &job_id, "需人脸/手机验证").await;
                 continue; // loop 顶部的 state check 会跑 final_cleanup 然后 return
             }
             warn!(%job_id, round, err = %e, "round failed; sleep + continue");
@@ -516,7 +516,7 @@ async fn check_risk_and_pause(
                     "RISK: wear hit threshold {} consecutive times → auto pause",
                     *wear_consec_hits,
                 );
-                let _ = jobs::set_state(&state.db, job_id, jobs::JobState::Paused).await;
+                let _ = jobs::set_paused_with_reason(&state.db, job_id, "磨损超阈值").await;
                 return true;
             }
             warn!(

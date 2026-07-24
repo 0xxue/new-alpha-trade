@@ -24,6 +24,8 @@ export interface JobRow {
   params: unknown;
   target_volume: string;
   state: string;
+  /// 自动暂停原因（如「需人脸/手机验证」「磨损超阈值」）；手动暂停/未暂停为 null
+  pause_reason?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -49,6 +51,8 @@ export interface JobStats {
   symbol: string;
   strategy: string;
   state: string;
+  /// 自动暂停原因（风控/人脸），前端据此显示醒目提示；手动暂停/未暂停为 null
+  pause_reason?: string | null;
   buy_volume_usdt: string;
   target_volume_usdt: string;
   progress_bps: number;
