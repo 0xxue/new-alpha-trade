@@ -20,6 +20,7 @@ import {
 } from "../api/face";
 import JobChart from "../components/JobChart";
 import OrderEvents from "../components/OrderEvents";
+import AuthImg from "../components/AuthImg";
 
 const STATE_COLOR: Record<string, string> = {
   pending: "bg-neutral-500/20 text-neutral-300",
@@ -695,7 +696,7 @@ function FaceVerifyPanel({
               "用手机币安 App 扫这个二维码，等待状态变为 verified 后再继续"
             )}
           </div>
-          <img
+          <AuthImg
             src={`${faceQrUrl(username)}&n=${imgNonce}`}
             alt="face verify QR"
             className="max-w-xs rounded"

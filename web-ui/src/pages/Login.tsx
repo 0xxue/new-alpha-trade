@@ -8,6 +8,7 @@ import {
   startLogin,
   type LoginStatus,
 } from "../api/qr";
+import AuthImg from "../components/AuthImg";
 
 const STATUS_LABEL: Record<LoginStatus, string> = {
   pending: "正在打开浏览器…",
@@ -143,7 +144,7 @@ export default function Login() {
               </div>
               <div className="bg-white rounded-xl p-3 flex items-center justify-center aspect-square">
                 {imageUrl ? (
-                  <img
+                  <AuthImg
                     src={imageUrl}
                     alt="QR"
                     className="w-full h-full object-contain"
