@@ -14,11 +14,15 @@ export default function AuthImg({
   alt,
   className,
   onError,
+  onImageClick,
 }: {
   src: string;
   alt?: string;
   className?: string;
   onError?: () => void;
+  /// 点击回调，回传的是**图片原始尺寸**下的坐标（截图是 1280x800 整页图，
+  /// 所以这就是页面坐标，后端可直接拿去 page.mouse.click）。
+  onImageClick?: (x: number, y: number) => void;
 }) {
   const [objUrl, setObjUrl] = useState<string | null>(null);
 
@@ -50,5 +54,21 @@ export default function AuthImg({
   }, [src]);
 
   if (!objUrl) return null;
-  return <img src={objUrl} alt={alt} className={className} />;
+  if (!onImageClick) return <img src={objUrl} alt={alt} className={className} />;
+  return (
+    <img
+      src={objUrl}
+      alt={alt}
+      className={className}
+      style={{ cursor: "crosshair" }}
+      onClick={(e) => {
+        const img = e.currentTarget;
+        const r = img.getBoundingClientRect();
+        // 显示尺寸 → 原始尺寸换算（图片可能被 CSS 缩放）
+        const x = ((e.clientX - r.left) / r.width) * img.naturalWidth;
+        const y = ((e.clientY - r.top) / r.height) * img.naturalHeight;
+        onImageClick(Math.round(x), Math.round(y));
+      }}
+    />
+  );
 }

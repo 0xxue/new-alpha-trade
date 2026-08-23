@@ -21,6 +21,20 @@ class LoginRequest(BaseModel):
     username: str
 
 
+class ClickRequest(BaseModel):
+    """点击坐标，已按截图原始尺寸(1280x800)换算。"""
+    x: float
+    y: float
+
+
+class TypeRequest(BaseModel):
+    text: str
+
+
+class KeyRequest(BaseModel):
+    key: str
+
+
 class LoginResponse(BaseModel):
     session_id: str
     status: str
@@ -87,3 +101,39 @@ async def refresh_qr(session_id: str, req: Request) -> Response:
     if not mgr.request_refresh(session_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------- 远程交互
+# 币安扫码后可能弹「安全验证要求 0/3」（验证器App / 邮箱 / 人脸识别），
+# 面板上原本只是静态截图，点不了 → 账号加不进去。
+# 下面三个端点让用户直接操作服务器上的无头浏览器，完成验证后即可继续登录。
+
+def _act(result: str | None) -> Response:
+    if result == "session not found":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, result)
+    if result:
+        raise HTTPException(status.HTTP_409_CONFLICT, result)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/click/{session_id}", response_class=Response)
+async def interact_click(session_id: str, body: ClickRequest, req: Request) -> Response:
+    """在页面坐标 (x, y) 点一下，然后重新截图。"""
+    return _act(await _manager(req).interact_click(session_id, body.x, body.y))
+
+
+@router.post("/type/{session_id}", response_class=Response)
+async def interact_type(session_id: str, body: TypeRequest, req: Request) -> Response:
+    """往当前焦点输入框敲字（验证码等），然后重新截图。"""
+    if not body.text:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "text required")
+    return _act(await _manager(req).interact_type(session_id, body.text))
+
+
+@router.post("/key/{session_id}", response_class=Response)
+async def interact_key(session_id: str, body: KeyRequest, req: Request) -> Response:
+    """按一个键（Enter / Backspace / Tab 等），然后重新截图。"""
+    allowed = {"Enter", "Backspace", "Tab", "Escape", "ArrowLeft", "ArrowRight", "Delete"}
+    if body.key not in allowed:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"key must be one of {sorted(allowed)}")
+    return _act(await _manager(req).interact_key(session_id, body.key))

@@ -112,6 +112,11 @@ class LoginSession:
     _yes_clicked: bool = False
     # 用户点"刷新二维码"会 set 这个 flag，capture_loop 检测到 → reload + 重截图
     _refresh_requested: bool = False
+    # 远程点击：API 要操作这个 page（币安弹「安全验证要求」时，面板上的截图
+    # 只能看不能点，账号就加不进去）。用 _page_lock 串行化，避免 API 动作与
+    # capture_loop 的 reload/截图互相打架。
+    _page: "Page | None" = None
+    _page_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class LoginSessionManager:
@@ -188,6 +193,67 @@ class LoginSessionManager:
         logger.info("[%s] manual QR refresh requested", sess.username)
         return True
 
+    # ------------------------------------------------------ 远程交互（过安全验证）
+    # 币安在扫码后可能弹「安全验证要求 0/3」（验证器App / 邮箱 / 人脸），
+    # 面板上原本只是静态截图 → 点不了 → 账号加不进去。
+    # 下面三个动作让用户直接操作服务器上的无头浏览器：点击、输入、按键。
+    # 截图是 1280x800 整页图，前端传来的坐标已按图片原始尺寸换算，可直接用。
+
+    def _live_page(self, session_id: str):
+        """取出可交互的 page；session 不存在/浏览器没起来则返回 (None, 原因)。"""
+        sess = self.sessions.get(session_id)
+        if sess is None:
+            return None, None, "session not found"
+        if sess._page is None:
+            return None, sess, "browser not ready"
+        return sess._page, sess, None
+
+    async def interact_click(self, session_id: str, x: float, y: float):
+        page, sess, err = self._live_page(session_id)
+        if err:
+            return err
+        async with sess._page_lock:
+            try:
+                await page.mouse.click(x, y)
+                logger.info("[%s] remote click at (%.0f, %.0f)", sess.username, x, y)
+                await asyncio.sleep(1.0)     # 等 UI 响应（弹窗切换/跳转）
+                await self._take_qr_screenshot(page, sess)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] remote click failed: %s", sess.username, e)
+                return f"click failed: {e}"
+        return None
+
+    async def interact_type(self, session_id: str, text: str):
+        page, sess, err = self._live_page(session_id)
+        if err:
+            return err
+        async with sess._page_lock:
+            try:
+                # delay 让币安的输入校验/自动跳格能跟上（验证码框常是分格输入）
+                await page.keyboard.type(text, delay=60)
+                logger.info("[%s] remote type %d chars", sess.username, len(text))
+                await asyncio.sleep(0.8)
+                await self._take_qr_screenshot(page, sess)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] remote type failed: %s", sess.username, e)
+                return f"type failed: {e}"
+        return None
+
+    async def interact_key(self, session_id: str, key: str):
+        page, sess, err = self._live_page(session_id)
+        if err:
+            return err
+        async with sess._page_lock:
+            try:
+                await page.keyboard.press(key)
+                logger.info("[%s] remote key %s", sess.username, key)
+                await asyncio.sleep(1.0)
+                await self._take_qr_screenshot(page, sess)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] remote key failed: %s", sess.username, e)
+                return f"key failed: {e}"
+        return None
+
     # ------------------------------------------------------------------ 主逻辑
     async def _run(self, sess: LoginSession) -> None:
         try:
@@ -233,6 +299,7 @@ class LoginSessionManager:
 
         try:
             page = await context.new_page()
+            sess._page = page          # 供远程点击/输入使用
             await page.add_init_script(INIT_SCRIPT)
 
             page.on("request", lambda req: asyncio.create_task(self._on_request(sess, req)))
@@ -536,11 +603,13 @@ class LoginSessionManager:
                 sess._refresh_requested = False
                 logger.info("[%s] handling manual QR refresh", sess.username)
                 try:
-                    await page.reload(wait_until="domcontentloaded", timeout=20_000)
-                    await asyncio.sleep(2)
-                    await self._click_qr_button(page, sess)
-                    await asyncio.sleep(1)
-                    await self._take_qr_screenshot(page, sess)
+                    # 与远程点击共用一把锁：reload 途中不能被 click/type 插进来
+                    async with sess._page_lock:
+                        await page.reload(wait_until="domcontentloaded", timeout=20_000)
+                        await asyncio.sleep(2)
+                        await self._click_qr_button(page, sess)
+                        await asyncio.sleep(1)
+                        await self._take_qr_screenshot(page, sess)
                     logger.info("[%s] manual QR refresh done", sess.username)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[%s] manual QR refresh failed: %s", sess.username, e)
@@ -551,7 +620,10 @@ class LoginSessionManager:
                 or time.time() - sess.last_qr_refresh >= self.qr_refresh_interval_s
             ):
                 try:
-                    await self._take_qr_screenshot(page, sess)
+                    # 不阻塞远程点击：锁被占着就跳过这轮，下一轮再截
+                    if not sess._page_lock.locked():
+                        async with sess._page_lock:
+                            await self._take_qr_screenshot(page, sess)
                 except Exception:  # noqa: BLE001
                     pass
             await asyncio.sleep(0.5)

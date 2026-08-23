@@ -123,3 +123,37 @@ export async function getCurrent2faCode(
     await fetch(`${base}/auth/${encodeURIComponent(username)}/2fa-code`)
   );
 }
+
+// ---------------------------------------------------------------- 远程交互
+// 币安扫码后可能弹「安全验证要求 0/3」，面板上的截图原本点不了 → 账号加不进去。
+// 下面三个把用户操作转发到服务器上的无头浏览器，动作后后端会立即重截图。
+
+/** 在截图上点一下。x/y 是图片原始尺寸下的坐标（= 页面坐标）。 */
+export async function clickAt(sessionId: string, x: number, y: number): Promise<void> {
+  const r = await fetch(`${base}/click/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ x, y }),
+  });
+  if (!r.ok) throw new Error(`点击失败: HTTP ${r.status}`);
+}
+
+/** 往当前焦点输入框敲字（验证码等）。 */
+export async function typeText(sessionId: string, text: string): Promise<void> {
+  const r = await fetch(`${base}/type/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!r.ok) throw new Error(`输入失败: HTTP ${r.status}`);
+}
+
+/** 按键：Enter / Backspace / Tab / Escape 等。 */
+export async function pressKey(sessionId: string, key: string): Promise<void> {
+  const r = await fetch(`${base}/key/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  if (!r.ok) throw new Error(`按键失败: HTTP ${r.status}`);
+}

@@ -40,6 +40,9 @@ async def lifespan(app: FastAPI):
     headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() in ("1", "true", "yes")
     face_keepalive_s = int(os.environ.get("FACE_VERIFY_KEEPALIVE_S", "300"))
     face_qr_refresh_s = int(os.environ.get("FACE_QR_REFRESH_INTERVAL_S", "62"))
+    # 扫码会话存活时长：默认从 300s 提到 900s —— 币安可能要求「安全验证 0/3」
+    # 三步验证（验证器/邮箱/人脸），用户远程点击+收验证码需要时间，5 分钟不够用。
+    login_timeout_s = int(os.environ.get("LOGIN_SESSION_TIMEOUT_S", "900"))
 
     storage = Storage(db_path)
     if not await storage.has_schema():
@@ -51,6 +54,7 @@ async def lifespan(app: FastAPI):
         qr_dir=qr_dir,
         playwright_state_dir=pw_state_dir,
         headless=headless,
+        session_timeout_s=login_timeout_s,
     )
     face_mgr = FaceVerifyManager(
         playwright_state_dir=pw_state_dir,

@@ -6,6 +6,9 @@ import {
   qrImageUrl,
   refreshQr,
   startLogin,
+  clickAt,
+  typeText,
+  pressKey,
   type LoginStatus,
 } from "../api/qr";
 import AuthImg from "../components/AuthImg";
@@ -30,6 +33,12 @@ export default function Login() {
   const [status, setStatus] = useState<LoginStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [imageTick, setImageTick] = useState(0);
+  // 远程操作：币安弹「安全验证要求 0/3」时，截图能点、能输入，直接在服务器
+  // 的浏览器里完成验证（否则账号加不进去）。
+  const [interactive, setInteractive] = useState(false);
+  const [typeBuf, setTypeBuf] = useState("");
+  const [acting, setActing] = useState(false);
+  const [actErr, setActErr] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const tickRef = useRef<number | null>(null);
 
@@ -66,6 +75,21 @@ export default function Login() {
     return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // 任一远程操作后立刻 bump imageTick 拉最新截图（后端动作完成即已重截）
+  const runAction = async (fn: () => Promise<void>) => {
+    if (!sessionId || acting) return;
+    setActing(true);
+    setActErr(null);
+    try {
+      await fn();
+      setImageTick((n) => n + 1);
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActing(false);
+    }
+  };
 
   const handleStart = async () => {
     setError(null);
@@ -151,9 +175,86 @@ export default function Login() {
                     onError={() => {
                       /* QR 还没截好，下一轮 tick 会重试 */
                     }}
+                    onImageClick={
+                      interactive
+                        ? (x, y) => void runAction(() => clickAt(sessionId!, x, y))
+                        : undefined
+                    }
                   />
                 ) : (
                   <div className="text-neutral-500 text-sm">QR 准备中…</div>
+                )}
+              </div>
+
+              {/* 远程操作：币安要求「安全验证」时，这张截图就是服务器上的浏览器画面，
+                  打开开关后可以直接点它、给它输入，完成验证后登录会继续。 */}
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3 space-y-2">
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={interactive}
+                    onChange={(e) => {
+                      setInteractive(e.target.checked);
+                      setActErr(null);
+                    }}
+                    className="accent-yellow-500"
+                  />
+                  <span>
+                    手动操作模式
+                    <span className="text-neutral-500 text-xs ml-2">
+                      出现「安全验证要求」时打开，可直接点击画面完成验证
+                    </span>
+                  </span>
+                </label>
+
+                {interactive && (
+                  <>
+                    <div className="text-xs text-neutral-500">
+                      点击上方画面 = 在服务器浏览器里点同一位置；下方输入框可给焦点处打字。
+                      {acting && <span className="text-yellow-400 ml-1">执行中…</span>}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        value={typeBuf}
+                        onChange={(e) => setTypeBuf(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && typeBuf) {
+                            void runAction(async () => {
+                              await typeText(sessionId!, typeBuf);
+                              setTypeBuf("");
+                            });
+                          }
+                        }}
+                        placeholder="验证码 / 邮箱等，回车发送"
+                        className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-3 py-2 text-sm outline-none focus:border-neutral-600"
+                      />
+                      <button
+                        disabled={acting || !typeBuf}
+                        onClick={() =>
+                          void runAction(async () => {
+                            await typeText(sessionId!, typeBuf);
+                            setTypeBuf("");
+                          })
+                        }
+                        className="px-3 py-2 text-sm bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded"
+                      >
+                        发送
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      {(["Enter", "Backspace", "Tab", "Escape"] as const).map((k) => (
+                        <button
+                          key={k}
+                          disabled={acting}
+                          onClick={() => void runAction(() => pressKey(sessionId!, k))}
+                          className="flex-1 px-2 py-1.5 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded"
+                        >
+                          {k === "Enter" ? "回车" : k === "Backspace" ? "退格" : k}
+                        </button>
+                      ))}
+                    </div>
+                    {actErr && <div className="text-xs text-red-400">{actErr}</div>}
+                  </>
                 )}
               </div>
               {error && <div className="text-sm text-red-400 text-center">{error}</div>}
