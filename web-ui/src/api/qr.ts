@@ -130,7 +130,7 @@ export async function getCurrent2faCode(
 
 /** 在截图上点一下。x/y 是图片原始尺寸下的坐标（= 页面坐标）。 */
 export async function clickAt(sessionId: string, x: number, y: number): Promise<void> {
-  const r = await fetch(`${base}/click/${sessionId}`, {
+  const r = await fetch(`${base}/qr/click/${sessionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ x, y }),
@@ -140,7 +140,7 @@ export async function clickAt(sessionId: string, x: number, y: number): Promise<
 
 /** 往当前焦点输入框敲字（验证码等）。 */
 export async function typeText(sessionId: string, text: string): Promise<void> {
-  const r = await fetch(`${base}/type/${sessionId}`, {
+  const r = await fetch(`${base}/qr/type/${sessionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
@@ -150,7 +150,7 @@ export async function typeText(sessionId: string, text: string): Promise<void> {
 
 /** 按键：Enter / Backspace / Tab / Escape 等。 */
 export async function pressKey(sessionId: string, key: string): Promise<void> {
-  const r = await fetch(`${base}/key/${sessionId}`, {
+  const r = await fetch(`${base}/qr/key/${sessionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key }),

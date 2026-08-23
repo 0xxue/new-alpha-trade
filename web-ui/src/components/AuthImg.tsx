@@ -64,9 +64,18 @@ export default function AuthImg({
       onClick={(e) => {
         const img = e.currentTarget;
         const r = img.getBoundingClientRect();
-        // 显示尺寸 → 原始尺寸换算（图片可能被 CSS 缩放）
-        const x = ((e.clientX - r.left) / r.width) * img.naturalWidth;
-        const y = ((e.clientY - r.top) / r.height) * img.naturalHeight;
+        const nw = img.naturalWidth;
+        const nh = img.naturalHeight;
+        if (!nw || !nh) return;
+        // 关键：图片用 object-contain 放在方形容器里，实际画面是「等比缩放 + 居中留白」。
+        // 直接用元素外框换算会把留白也算进去 → 坐标整体偏移、点不中。
+        // 这里先求真实缩放比和留白偏移，再反推页面坐标。
+        const scale = Math.min(r.width / nw, r.height / nh);
+        const offX = (r.width - nw * scale) / 2;
+        const offY = (r.height - nh * scale) / 2;
+        const x = (e.clientX - r.left - offX) / scale;
+        const y = (e.clientY - r.top - offY) / scale;
+        if (x < 0 || y < 0 || x > nw || y > nh) return; // 点在留白上，忽略
         onImageClick(Math.round(x), Math.round(y));
       }}
     />
