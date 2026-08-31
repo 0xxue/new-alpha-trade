@@ -122,24 +122,42 @@ pub fn start_user_streams(
     });
 }
 
-/// engine 启动时，扫 DB 把上次还在跑的 jobs 重新 spawn 给 runner（防止 engine 重启丢任务）。
-pub fn resume_orphan_jobs(state: AppState) {
+/// engine 启动时处理上一轮遗留的 jobs —— **一律不自动开跑**。
+///
+/// 为什么改成这样：以前这里会把 running + paused 的 job 全部重新 spawn 给 runner。
+/// 结果服务器欠费停机 / 我方发版重启后，引擎一起来就自己接着刷老任务（用户
+/// 忘记续费，续费恢复当天一直在刷不相干的币，白白磨损）。
+///
+/// 现在的规则：**任何任务都不会自己跑起来，必须人手动点启动。**
+/// - 上次 running 的 → 置为 stopped 并写明原因（它已经不在交易了，状态要如实反映）
+/// - 上次 paused 的 → 保持 paused，只是不给它起 runner
+/// 两种都不 spawn runner；用户在面板点「启动/继续」时 trade_resume 会新起一个。
+pub fn halt_orphan_jobs(state: AppState) {
     tokio::spawn(async move {
-        // 包含 running + paused（paused 进 runner 会自循环等待）
-        let running = persistence::repo::jobs::list(&state.db, Some(persistence::repo::jobs::JobState::Running))
+        use persistence::repo::jobs;
+        let running = jobs::list(&state.db, Some(jobs::JobState::Running))
             .await
             .unwrap_or_default();
-        let paused = persistence::repo::jobs::list(&state.db, Some(persistence::repo::jobs::JobState::Paused))
-            .await
-            .unwrap_or_default();
-        let mut total = 0;
-        for j in running.into_iter().chain(paused.into_iter()) {
-            state.runner.start(state.clone(), j.id.clone()).await;
-            tracing::info!(job_id = %j.id, state = %j.state, "resumed orphan job");
-            total += 1;
+        let mut halted = 0;
+        for j in running {
+            let _ = jobs::set_state_with_reason(
+                &state.db,
+                &j.id,
+                jobs::JobState::Stopped,
+                "引擎重启，未自动恢复（需手动启动）",
+            )
+            .await;
+            tracing::info!(job_id = %j.id, "orphan running job halted (no auto-resume)");
+            halted += 1;
         }
-        if total > 0 {
-            tracing::info!(%total, "orphan jobs resumed after engine restart");
+        let paused = jobs::list(&state.db, Some(jobs::JobState::Paused))
+            .await
+            .unwrap_or_default();
+        if halted > 0 || !paused.is_empty() {
+            tracing::info!(
+                halted, paused = paused.len(),
+                "engine restart: no job auto-resumed; start them manually if needed"
+            );
         }
     });
 }

@@ -128,6 +128,25 @@ pub async fn set_paused_with_reason(
     Ok(r.rows_affected() > 0)
 }
 
+/// 写状态并附一条原因（引擎重启后把孤儿任务置停等场景用）。
+/// 与 set_state 的区别：set_state 会清空 pause_reason，这个会写入。
+pub async fn set_state_with_reason(
+    pool: &SqlitePool,
+    id: &str,
+    state: JobState,
+    reason: &str,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE jobs SET state = ?, pause_reason = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(state.as_str())
+    .bind(reason)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
 /// 覆盖整条 params_json（wear 自动重置基线用）。
 pub async fn set_params_json(pool: &SqlitePool, id: &str, params_json: &str) -> sqlx::Result<bool> {
     let r = sqlx::query(

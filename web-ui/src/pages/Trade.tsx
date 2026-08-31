@@ -331,7 +331,7 @@ export default function Trade() {
                     <span className="font-mono text-xs truncate">{j.id.slice(0, 8)}</span>
                     <span className={`px-1.5 py-0.5 rounded text-[10px] ${cls}`}>{j.state}</span>
                   </div>
-                  {j.state === "paused" && j.pause_reason && (
+                  {["paused", "stopped"].includes(j.state) && j.pause_reason && (
                     <div className="text-[10px] text-amber-400 mt-1 truncate">
                       ⚠ {j.pause_reason}
                     </div>
@@ -380,13 +380,15 @@ export default function Trade() {
           {stats && (
             <>
               {/* ⚠ 自动暂停横幅：区分风控/人脸暂停 vs 手动暂停，直接引导用户处理 */}
-              {stats.state === "paused" && stats.pause_reason && (
+              {["paused", "stopped"].includes(stats.state) && stats.pause_reason && (
                 <div className="bg-amber-500/15 border border-amber-500/40 rounded-lg p-3 text-sm text-amber-200">
-                  <div className="font-medium">⚠ 已被引擎自动暂停：{stats.pause_reason}</div>
+                  <div className="font-medium">
+                    ⚠ {stats.state === "stopped" ? "已停止" : "已被引擎自动暂停"}：{stats.pause_reason}
+                  </div>
                   <div className="text-xs text-amber-300/80 mt-1">
                     {stats.pause_reason.includes("验证")
                       ? "请用下方「人脸 / 手机验证」面板触发、用币安 App 扫码完成验证后，点上方「▶ 启动/继续」续刷。"
-                      : "处理完毕后，点上方「▶ 启动/继续」续刷。"}
+                      : "引擎不会自动恢复任何任务 —— 确认要继续时，请手动点上方「▶ 启动/继续」。"}
                   </div>
                 </div>
               )}

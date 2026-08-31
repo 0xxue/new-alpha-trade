@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     api::start_ws(&alpha_ws, live_book.clone());
     api::start_user_streams(pool.clone(), alpha.clone(), qr.clone(), alpha_ws.clone());
 
-    // 把 AppState 实例化两份共享：一份给 resume_orphan_jobs，一份进 router
+    // 把 AppState 实例化两份共享：一份给 halt_orphan_jobs，一份进 router
     let state = api::AppState {
         db: pool.clone(),
         alpha: alpha.clone(),
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         recent_trades: recent_trades.clone(),
         live_book: live_book.clone(),
     };
-    api::resume_orphan_jobs(state.clone());
+    api::halt_orphan_jobs(state.clone());
     api::reconciler::start(pool.clone(), alpha.clone(), qr.clone());
 
     tracing::info!(%addr, "trading-engine listening");
