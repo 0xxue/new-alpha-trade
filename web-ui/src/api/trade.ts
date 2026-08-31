@@ -134,7 +134,7 @@ export async function stopJob(jobId: string) {
   return jsonOrThrow(await fetch(`${base}/trade/stop/${jobId}`, { method: "POST" }));
 }
 
-/** 一键清理：把所有 paused / pending 的任务置为 stopped，避免日后被误启动。 */
-export async function cleanupJobs(): Promise<{ cleaned: number }> {
+/** 一键清空任务列表：非 running 的任务全部置停并隐藏（历史数据保留）。 */
+export async function cleanupJobs(): Promise<{ cleaned: number; stopped: number; hidden: number }> {
   return jsonOrThrow(await fetch(`${base}/trade/cleanup`, { method: "POST" }));
 }

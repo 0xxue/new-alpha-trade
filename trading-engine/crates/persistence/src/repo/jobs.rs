@@ -39,6 +39,8 @@ pub struct JobRow {
     pub state: String,
     /// 自动暂停原因（风控/人脸验证等）。NULL=手动暂停或未暂停。
     pub pause_reason: Option<String>,
+    /// 1 = 已被「一键清空」隐藏，不在任务列表里显示（数据仍保留）。
+    pub hidden: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -71,7 +73,7 @@ pub async fn insert(pool: &SqlitePool, j: &NewJob) -> sqlx::Result<()> {
 
 pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<JobRow>> {
     sqlx::query_as::<_, JobRow>(
-        "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
+        "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, hidden, created_at, updated_at \
          FROM jobs WHERE id = ?",
     )
     .bind(id)
@@ -82,16 +84,16 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<JobRow>> {
 pub async fn list(pool: &SqlitePool, state_filter: Option<JobState>) -> sqlx::Result<Vec<JobRow>> {
     if let Some(s) = state_filter {
         sqlx::query_as::<_, JobRow>(
-            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
-             FROM jobs WHERE state = ? ORDER BY created_at DESC",
+            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, hidden, created_at, updated_at \
+             FROM jobs WHERE state = ? AND hidden = 0 ORDER BY created_at DESC",
         )
         .bind(s.as_str())
         .fetch_all(pool)
         .await
     } else {
         sqlx::query_as::<_, JobRow>(
-            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, created_at, updated_at \
-             FROM jobs ORDER BY created_at DESC",
+            "SELECT id, username, symbol, strategy, params_json, target_volume, state, pause_reason, hidden, created_at, updated_at \
+             FROM jobs WHERE hidden = 0 ORDER BY created_at DESC",
         )
         .fetch_all(pool)
         .await
@@ -145,6 +147,29 @@ pub async fn set_state_with_reason(
     .execute(pool)
     .await?;
     Ok(r.rows_affected() > 0)
+}
+
+/// 一键清空任务列表：把非 running 的任务全部置停 + 隐藏。
+///
+/// 用户诉求是「眼不见心不烦」—— 清完列表里除了正在跑的，其余全部消失，
+/// 也不会再被误点启动。隐藏而非删除：trades/orders/rounds 都挂在 job_id 上，
+/// 真删会连历史盈亏一起抹掉。
+/// 返回 (置停数, 隐藏数)。正在 running 的任务不动。
+pub async fn cleanup_and_hide(pool: &SqlitePool) -> sqlx::Result<(u64, u64)> {
+    let stopped = sqlx::query(
+        "UPDATE jobs SET state = 'stopped', pause_reason = ?, updated_at = datetime('now')          WHERE state IN ('paused', 'pending')",
+    )
+    .bind("一键清空（不会再自动启动）")
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let hidden = sqlx::query(
+        "UPDATE jobs SET hidden = 1, updated_at = datetime('now')          WHERE state <> 'running' AND hidden = 0",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok((stopped, hidden))
 }
 
 /// 覆盖整条 params_json（wear 自动重置基线用）。

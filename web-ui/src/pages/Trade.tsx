@@ -176,22 +176,31 @@ export default function Trade() {
     }
   };
 
-  // 一键清理：把所有暂停/待启动的任务置停，防止列表里的旧任务日后被误点启动
+  // 一键清空任务列表：除了正在跑的，其余全部置停并从列表消失（数据保留，只是不显示）
   const handleCleanup = async () => {
-    const n = jobs.filter((j) => ["paused", "pending"].includes(j.state)).length;
-    if (n === 0) {
-      alert("没有暂停/待启动的任务需要清理");
+    const keep = jobs.filter((j) => j.state === "running").length;
+    const gone = jobs.length - keep;
+    if (gone === 0) {
+      alert("列表里没有可清空的任务");
       return;
     }
-    if (!window.confirm(`将把 ${n} 个暂停/待启动的任务全部置为「停止」。
-清理后它们不会再被误点启动，需要刷量请新建任务。
+    if (
+      !window.confirm(
+        `将清空 ${gone} 个任务（正在跑的 ${keep} 个保留）。
 
-确认清理？`)) return;
+清空后它们从列表消失、也不会再被启动。
+历史成交数据仍保留，只是不再显示。
+
+确认清空？`
+      )
+    )
+      return;
     try {
       const r = await cleanupJobs();
+      setSelectedId(null);
+      setJobPage(0);
       await reloadJobs();
-      await reloadStats();
-      alert(`已清理 ${r.cleaned} 个任务`);
+      alert(`已清空 ${r.cleaned} 个任务`);
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
     }
@@ -336,9 +345,9 @@ export default function Trade() {
               <button
                 onClick={handleCleanup}
                 className="text-xs text-amber-500 hover:text-amber-400"
-                title="把所有暂停/待启动的任务置为停止，防止日后被误点启动"
+                title="除了正在跑的任务，其余全部置停并从列表移除（历史数据保留）"
               >
-                清理暂停任务
+                清空任务列表
               </button>
               <button
                 onClick={reloadJobs}

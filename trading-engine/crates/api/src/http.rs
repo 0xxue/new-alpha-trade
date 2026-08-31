@@ -509,31 +509,15 @@ async fn trade_stop(State(s): State<AppState>, Path(id): Path<String>) -> Result
     trade_set_state(s, id, jobs::JobState::Stopped).await
 }
 
-/// 一键清理：把所有 paused / pending 的任务置为 stopped。
+/// 一键清空任务列表：非 running 的任务全部置停 + 隐藏。
 ///
-/// 为什么要这个：暂停的任务留在列表里，日后容易被误点「启动」，或在别的
-/// 场景被拉起来接着刷（尤其是刷的还是早就不想要的币）。清理一遍之后列表
-/// 干净，剩下的都是明确结束的任务，想刷就新建一个。
+/// 用户诉求：清完之后「下面没有开始的任务全部没了」，眼不见心不烦，
+/// 也不会再被误点启动。隐藏而非删除，历史成交数据仍在（列表不显示而已）。
+/// 正在跑的任务不动。
 async fn trade_cleanup(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
-    let mut cleaned = 0usize;
-    for st in [jobs::JobState::Paused, jobs::JobState::Pending] {
-        let rows = jobs::list(&s.db, Some(st)).await.map_err(ApiErr::internal)?;
-        for j in rows {
-            if jobs::set_state_with_reason(
-                &s.db,
-                &j.id,
-                jobs::JobState::Stopped,
-                "手动清理（避免日后被误启动）",
-            )
-            .await
-            .map_err(ApiErr::internal)?
-            {
-                cleaned += 1;
-            }
-        }
-    }
-    tracing::info!(cleaned, "cleanup: paused/pending jobs marked stopped");
-    Ok(Json(json!({ "cleaned": cleaned })))
+    let (stopped, hidden) = jobs::cleanup_and_hide(&s.db).await.map_err(ApiErr::internal)?;
+    tracing::info!(stopped, hidden, "cleanup: jobs stopped + hidden from list");
+    Ok(Json(json!({ "cleaned": hidden, "stopped": stopped, "hidden": hidden })))
 }
 
 fn job_to_json(j: jobs::JobRow) -> Value {
