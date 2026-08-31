@@ -7,6 +7,7 @@ import {
   resumeJob,
   startJob,
   stopJob,
+  cleanupJobs,
   type JobRow,
   type JobStats,
   type RoundStats,
@@ -46,7 +47,9 @@ export default function Trade() {
 
   // 新建 job 表单
   const [username, setUsername] = useState("");
-  const [symbolQuery, setSymbolQuery] = useState("NEX"); // 用户输入的友好名
+  // 不设默认币种：曾有人忘记改币种，表单里的默认 NEX 被直接刷了一笔，亏了 50u。
+  // 空值时下面的「开始刷量」按钮是禁用的，必须自己输入币种才能创建。
+  const [symbolQuery, setSymbolQuery] = useState(""); // 用户输入的友好名
   const [target, setTarget] = useState("16400");
   const [singleMin, setSingleMin] = useState("25");
   const [singleMax, setSingleMax] = useState("38");
@@ -135,6 +138,11 @@ export default function Trade() {
   }, [selectedId, reloadStats]);
 
   const handleCreate = async () => {
+    // 兜底：币种必须显式输入（按钮虽已禁用，防止回车等路径绕过）
+    if (!symbolQuery.trim()) {
+      setCreateError("请先输入币种");
+      return;
+    }
     setCreating(true);
     setCreateError(null);
     try {
@@ -163,6 +171,27 @@ export default function Trade() {
       else await stopJob(selectedId);
       await reloadJobs();
       await reloadStats();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // 一键清理：把所有暂停/待启动的任务置停，防止列表里的旧任务日后被误点启动
+  const handleCleanup = async () => {
+    const n = jobs.filter((j) => ["paused", "pending"].includes(j.state)).length;
+    if (n === 0) {
+      alert("没有暂停/待启动的任务需要清理");
+      return;
+    }
+    if (!window.confirm(`将把 ${n} 个暂停/待启动的任务全部置为「停止」。
+清理后它们不会再被误点启动，需要刷量请新建任务。
+
+确认清理？`)) return;
+    try {
+      const r = await cleanupJobs();
+      await reloadJobs();
+      await reloadStats();
+      alert(`已清理 ${r.cleaned} 个任务`);
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
     }
@@ -198,7 +227,7 @@ export default function Trade() {
                 setShowSuggest(true);
               }}
               onFocus={() => setShowSuggest(true)}
-              placeholder="币种 (NEX, ZEST)"
+              placeholder="币种（必填，如 ZEST）"
               className="w-full bg-neutral-950 border border-neutral-800 rounded px-3 py-2 text-sm outline-none focus:border-neutral-600"
             />
             {showSuggest && symbolMatches.length > 0 && (
@@ -303,12 +332,21 @@ export default function Trade() {
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 lg:col-span-1">
           <div className="text-sm text-neutral-400 mb-2 flex items-center justify-between">
             <span>任务列表 ({jobs.length})</span>
-            <button
-              onClick={reloadJobs}
-              className="text-xs text-neutral-500 hover:text-neutral-300"
-            >
-              刷新
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleCleanup}
+                className="text-xs text-amber-500 hover:text-amber-400"
+                title="把所有暂停/待启动的任务置为停止，防止日后被误点启动"
+              >
+                清理暂停任务
+              </button>
+              <button
+                onClick={reloadJobs}
+                className="text-xs text-neutral-500 hover:text-neutral-300"
+              >
+                刷新
+              </button>
+            </div>
           </div>
           {jobs.length === 0 && (
             <div className="text-sm text-neutral-600 p-4 text-center">还没有任务</div>

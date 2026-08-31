@@ -38,6 +38,7 @@ pub fn routes() -> Router<AppState> {
         .route("/trade/jobs", get(trade_jobs))
         .route("/trade/status/:id", get(trade_status))
         .route("/trade/pause/:id", post(trade_pause))
+        .route("/trade/cleanup", post(trade_cleanup))
         .route("/trade/resume/:id", post(trade_resume))
         .route("/trade/stop/:id", post(trade_stop))
         .route("/trade/stats/:id", get(trade_stats))
@@ -506,6 +507,33 @@ async fn trade_stop(State(s): State<AppState>, Path(id): Path<String>) -> Result
     // 不 abort（abort 会 kill runner 来不及 cleanup → 持仓残留）
     // 卡在长任务时最多 8s（fill timeout）才响应
     trade_set_state(s, id, jobs::JobState::Stopped).await
+}
+
+/// 一键清理：把所有 paused / pending 的任务置为 stopped。
+///
+/// 为什么要这个：暂停的任务留在列表里，日后容易被误点「启动」，或在别的
+/// 场景被拉起来接着刷（尤其是刷的还是早就不想要的币）。清理一遍之后列表
+/// 干净，剩下的都是明确结束的任务，想刷就新建一个。
+async fn trade_cleanup(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    let mut cleaned = 0usize;
+    for st in [jobs::JobState::Paused, jobs::JobState::Pending] {
+        let rows = jobs::list(&s.db, Some(st)).await.map_err(ApiErr::internal)?;
+        for j in rows {
+            if jobs::set_state_with_reason(
+                &s.db,
+                &j.id,
+                jobs::JobState::Stopped,
+                "手动清理（避免日后被误启动）",
+            )
+            .await
+            .map_err(ApiErr::internal)?
+            {
+                cleaned += 1;
+            }
+        }
+    }
+    tracing::info!(cleaned, "cleanup: paused/pending jobs marked stopped");
+    Ok(Json(json!({ "cleaned": cleaned })))
 }
 
 fn job_to_json(j: jobs::JobRow) -> Value {
