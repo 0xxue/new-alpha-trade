@@ -13,6 +13,8 @@ use binance_alpha::{
     AggTradeEvent, AlphaRest, AlphaWsClient, DepthUpdateEvent, OrderBookSnapshot, StreamEvent,
 };
 use std::time::Instant;
+use crypto_orderbook::orderbook::sync::{handshake, live, Handshake, Live, Market};
+use crypto_orderbook::DepthUpdate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -180,6 +182,10 @@ pub struct LiveOrderBook {
 struct LiveBookState {
     symbol: String,
     last_update_id: u64,
+    /// 已从 snapshot 接上第一个 event（之后按 pu 链校验）
+    synced: bool,
+    /// 发现缺口：book 已清空，等新 snapshot
+    gap: bool,
     /// price → qty （bids 取最大 key 是 best_bid）
     bids: BTreeMap<Decimal, Decimal>,
     /// price → qty （asks 取最小 key 是 best_ask）
@@ -260,6 +266,8 @@ impl LiveOrderBook {
         let state = LiveBookState {
             symbol: symbol.to_string(),
             last_update_id: snap.last_update_id,
+            synced: false,
+            gap: false,
             bids,
             asks,
             updated_at: Instant::now(),
@@ -272,20 +280,47 @@ impl LiveOrderBook {
     }
 
     /// 应用一个增量 event。如果 symbol 不匹配或 lastUpdateId 落后则忽略。
-    fn apply(&self, evt: &DepthUpdateEvent) {
+    /// 返回 true 表示发现缺口（book 已清空），需要立刻 resync。
+    fn apply(&self, evt: &DepthUpdateEvent) -> bool {
         if let Ok(mut g) = self.inner.write() {
             let state = match g.as_mut() {
                 Some(s) => s,
-                None => return, // 未初始化
+                None => return false, // 未初始化
             };
-            if evt.symbol != state.symbol {
-                // 别的 symbol，忽略
-                return;
+            if evt.symbol != state.symbol || state.gap {
+                // 别的 symbol，或等待 resync，忽略
+                return false;
             }
-            // last_update_id 校验：alpha @depth 流的 event.u 应严格递增
-            if evt.final_update_id <= state.last_update_id {
-                return;
+            // Binance U/u/pu 协议（alpha 流带 pu，规则同 USD-M）：snapshot 后第一个 event
+            // 需 U <= lastUpdateId <= u，之后每个 event 的 pu 必须等于上一个 u。
+            let ids = DepthUpdate {
+                first_update_id: evt.first_update_id,
+                last_update_id: evt.final_update_id,
+                prev_last_update_id: evt.prev_final_update_id,
+                bids: Vec::new(),
+                asks: Vec::new(),
+            };
+            let gap = if state.synced {
+                match live(Market::UsdM, state.last_update_id, &ids) {
+                    Live::Apply => false,
+                    Live::Ignore => return false,
+                    Live::Gap { .. } => true,
+                }
+            } else {
+                match handshake(Market::UsdM, state.last_update_id, &ids) {
+                    Handshake::Apply => false,
+                    Handshake::Stale => return false,
+                    Handshake::Gap => true,
+                }
+            };
+            if gap {
+                // 漏了 event：book 已经错了，清空而不是继续用
+                state.bids.clear();
+                state.asks.clear();
+                state.gap = true;
+                return true;
             }
+            state.synced = true;
             // 应用 bids
             for b in &evt.bids {
                 if let (Ok(p), Ok(q)) = (Decimal::from_str(&b[0]), Decimal::from_str(&b[1])) {
@@ -309,6 +344,7 @@ impl LiveOrderBook {
             state.last_update_id = evt.final_update_id;
             state.updated_at = Instant::now();
         }
+        false
     }
 
     /// 启动后台任务订阅 ws depth 流并 apply
@@ -318,14 +354,23 @@ impl LiveOrderBook {
         tokio::spawn(async move {
             while let Ok(evt) = rx.recv().await {
                 if let Some(depth) = parse_depth(&evt) {
-                    me.apply(&depth);
+                    if me.apply(&depth) {
+                        if let Some(s) = me.current_symbol() {
+                            let me3 = me.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = me3.init_snapshot(&s).await {
+                                    tracing::warn!(symbol=%s, err=%e, "live_book gap resync failed");
+                                }
+                            });
+                        }
+                    }
                 }
             }
         });
         // V2.tune15: 周期 + 异常 resync — 修复增量丢包导致的 drift。
         // - 每 5s 抽检：若 book 是 crossed（bid > ask），说明漏了 remove event → 立刻 REST 重建
         // - 兜底 60s 定期 resync 即使没有 crossed 也刷一次
-        // Binance 推荐的 depth maintenance 协议要求严格的 U/u 重叠校验；我们用简化版（直接 init_snapshot）。
+        // U/u/pu 缺口由 apply 检测（crypto-orderbook），发现即清空并 resync。
         let me2 = self.clone();
         tokio::spawn(async move {
             let mut last_force_resync = Instant::now();
@@ -334,7 +379,7 @@ impl LiveOrderBook {
             loop {
                 interval.tick().await;
                 let sym_opt = me2.current_symbol();
-                let crossed = me2.is_crossed();
+                let crossed = me2.is_crossed() || me2.is_gapped();
                 let force = last_force_resync.elapsed() >= std::time::Duration::from_secs(60);
                 if let Some(s) = sym_opt {
                     if crossed || force {
@@ -350,6 +395,15 @@ impl LiveOrderBook {
                 }
             }
         });
+    }
+
+    /// 是否因缺口在等待 resync
+    pub fn is_gapped(&self) -> bool {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.gap))
+            .unwrap_or(false)
     }
 
     /// 检查当前 book 是否 crossed（bid > ask）。crossed 说明漏了 remove event。
@@ -602,6 +656,45 @@ pub struct DecisionContext {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    fn depth_evt(first: u64, last: u64, pu: u64, bid: (&str, &str)) -> DepthUpdateEvent {
+        DepthUpdateEvent {
+            event_type: "depthUpdate".into(),
+            event_time: 0,
+            transact_time: None,
+            symbol: "ALPHA_971USDT".into(),
+            first_update_id: first,
+            final_update_id: last,
+            prev_final_update_id: Some(pu),
+            bids: vec![[bid.0.to_string(), bid.1.to_string()]],
+            asks: vec![],
+        }
+    }
+
+    #[test]
+    fn live_book_clears_on_pu_gap() {
+        let lb = LiveOrderBook::new(5, Arc::new(AlphaRest::new().unwrap()));
+        *lb.inner.write().unwrap() = Some(LiveBookState {
+            symbol: "ALPHA_971USDT".into(),
+            last_update_id: 100,
+            synced: false,
+            gap: false,
+            bids: BTreeMap::from([(dec!(1.0), dec!(5))]),
+            asks: BTreeMap::from([(dec!(1.1), dec!(5))]),
+            updated_at: Instant::now(),
+        });
+        // stale (u < snapshot) dropped, then handshake U <= 100 <= u
+        assert!(!lb.apply(&depth_evt(80, 90, 70, ("1.0", "9"))));
+        assert!(!lb.apply(&depth_evt(95, 105, 92, ("1.05", "2"))));
+        assert!(!lb.apply(&depth_evt(106, 110, 105, ("1.05", "3"))));
+        // event 111..=120 (which cancels the 1.05 bid) is lost; next pu = 120 != 110
+        assert!(lb.apply(&depth_evt(121, 125, 120, ("0.9", "1"))));
+        assert!(lb.is_gapped());
+        assert!(lb.snapshot_any().unwrap().bids.is_empty());
+        // later events are not applied onto the wrong book
+        assert!(!lb.apply(&depth_evt(126, 130, 125, ("0.9", "1"))));
+        assert!(lb.snapshot_any().unwrap().bids.is_empty());
+    }
 
     fn book(bids: &[(&str, &str)], asks: &[(&str, &str)]) -> OrderBookSnapshot {
         OrderBookSnapshot {
