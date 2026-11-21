@@ -22,6 +22,7 @@ rust_decimal.workspace = true
 sqlx.workspace = true
 rand.workspace = true
 bcrypt = "0.15"
+crypto-orderbook = { version = "0.5.2", default-features = false }
 
 [dev-dependencies]
 rust_decimal_macros = "1.35"
